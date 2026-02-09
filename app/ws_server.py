@@ -105,7 +105,11 @@ async def handle_client(ws: WebSocketServerProtocol, path: str):
     device_id = ws.request_headers.get("x-device-id")
     token = ws.request_headers.get("x-device-token")
 
-    logger.info(f"New connection from {ws.remote_address}, device_id={device_id}")
+    # Log all headers for debugging
+    logger.info(f"New connection from {ws.remote_address}")
+    logger.info(f"Path: {path}")
+    logger.info(f"Headers: {dict(ws.request_headers)}")
+    logger.info(f"Extracted: device_id={device_id}, token={token}")
 
     if not device_id or not token:
         logger.warning(f"Missing credentials from {ws.remote_address}")
