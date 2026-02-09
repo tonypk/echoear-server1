@@ -91,11 +91,12 @@ async def process_audio(ws: WebSocketServerProtocol, state: ConnState):
 
     await ws.send(json.dumps({"type": "tts_start"}))
 
-    # Stream PCM in chunks (20ms @ 16kHz = 640 bytes)
-    chunk_size = 640
+    # Stream PCM in larger chunks (60ms @ 16kHz = 1920 bytes)
+    # Larger chunks reduce network overhead and improve stability
+    chunk_size = 1920  # 60ms frames like xiaozhi
     for i in range(0, len(audio), chunk_size):
         await ws.send(audio[i:i+chunk_size])
-        await asyncio.sleep(0)  # Yield to event loop
+        await asyncio.sleep(0.02)  # Small delay to pace transmission
 
     await ws.send(json.dumps({"type": "tts_end"}))
 
