@@ -248,8 +248,8 @@ async def ws_endpoint(ws: WebSocket):
                 break
             # Handle WebSocket protocol-level ping/pong frames
             elif msg_type == "websocket.ping":
-                # Must explicitly send pong response
-                await ws.send({"type": "websocket.pong"})
+                # Must explicitly send pong response with the same payload
+                await ws.send({"type": "websocket.pong", "bytes": msg.get("bytes", b"")})
                 continue
             elif msg_type == "websocket.pong":
                 # Received pong response (from our keepalive ping or client's response)
