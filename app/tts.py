@@ -1,6 +1,9 @@
 import httpx
 import opuslib
 import logging
+import subprocess
+import tempfile
+import os
 from .config import settings
 
 logger = logging.getLogger(__name__)
@@ -19,10 +22,17 @@ async def synthesize_tts(text: str) -> bytes:
         pcm_data = resp.content
 
     # Encode PCM16 to Opus (60ms frames @ 16kHz = 960 samples = 1920 bytes)
-    encoder = opuslib.Encoder(settings.pcm_sample_rate, settings.pcm_channels, opuslib.APPLICATION_AUDIO)
+    # Use VOIP application for better compression on voice
+    encoder = opuslib.Encoder(settings.pcm_sample_rate, settings.pcm_channels, opuslib.APPLICATION_VOIP)
 
-    # Set bitrate to auto (-1 = automatic bitrate)
-    encoder.bitrate = -1
+    # Set explicit bitrate for voice (16-32kbps is typical for voice)
+    encoder.bitrate = 24000
+
+    # Enable DTX (discontinuous transmission) for silence suppression
+    try:
+        encoder.complexity = 5  # Lower complexity for faster encoding
+    except:
+        pass
 
     opus_packets = []
     frame_size = 1920  # 60ms @ 16kHz mono PCM16 = 960 samples * 2 bytes
