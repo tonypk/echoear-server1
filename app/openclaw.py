@@ -11,7 +11,7 @@ _client = AsyncOpenAI(
 
 _conversation_history: list = []
 
-SYSTEM_PROMPT = "你是EchoEar，一个友好的中文语音助手。请用简短的中文回答用户的问题。"
+SYSTEM_PROMPT = "你是EchoEar，一个友好的语音助手。请用与用户相同的语言简短回答问题。如果用户说中文就用中文回答，说英文就用英文回答。"
 
 
 async def call_openclaw(text: str) -> str:
