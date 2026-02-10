@@ -177,7 +177,7 @@ async def process_audio(ws: WebSocketServerProtocol, state: ConnState):
             break
         await ws.send(packet)
         sent_count += 1
-        await asyncio.sleep(0.02)  # Pace transmission
+        await asyncio.sleep(0.06)  # Match 60ms Opus frame duration for realtime playback
 
     if not state.tts_abort:
         await ws.send(json.dumps({"type": "tts_end"}))
