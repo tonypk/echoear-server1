@@ -14,9 +14,12 @@ class Settings(BaseModel):
     openclaw_token: str = os.getenv("OPENCLAW_TOKEN", "")
     openclaw_model: str = os.getenv("OPENCLAW_MODEL", "openclaw:main")
 
-    # ASR/TTS endpoints
-    asr_url: str = os.getenv("ASR_URL", "http://127.0.0.1:9101/transcribe")
-    tts_url: str = os.getenv("TTS_URL", "http://127.0.0.1:9102/synthesize")
+    # OpenAI API
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    openai_asr_model: str = os.getenv("OPENAI_ASR_MODEL", "whisper-1")
+    openai_tts_model: str = os.getenv("OPENAI_TTS_MODEL", "tts-1")
+    openai_tts_voice: str = os.getenv("OPENAI_TTS_VOICE", "alloy")
 
     # Audio parameters (PCM16)
     pcm_sample_rate: int = int(os.getenv("PCM_SAMPLE_RATE", "16000"))

@@ -1,58 +1,73 @@
-import httpx
-import opuslib
+import io
 import logging
-import subprocess
-import tempfile
-import os
+import struct
+import opuslib
+from openai import AsyncOpenAI
 from .config import settings
 
 logger = logging.getLogger(__name__)
 
-async def synthesize_tts(text: str) -> bytes:
-    """Synthesize TTS and return Opus-encoded audio"""
-    async with httpx.AsyncClient(timeout=120) as client:
-        payload = {
-            "text": text,
-            "rate": settings.pcm_sample_rate,
-            "channels": settings.pcm_channels,
-            "format": "pcm16"
-        }
-        resp = await client.post(settings.tts_url, json=payload)
-        resp.raise_for_status()
-        pcm_data = resp.content
+_client = AsyncOpenAI(
+    api_key=settings.openai_api_key,
+    base_url=settings.openai_base_url,
+)
+
+
+def _resample_24k_to_16k(pcm_24k: bytes) -> bytes:
+    """Resample PCM16 from 24kHz to 16kHz using simple linear interpolation.
+    OpenAI TTS pcm format outputs 24kHz 16-bit mono."""
+    samples_24k = struct.unpack(f'<{len(pcm_24k) // 2}h', pcm_24k)
+    n_in = len(samples_24k)
+    n_out = n_in * 2 // 3  # 16000/24000 = 2/3
+
+    samples_16k = []
+    for i in range(n_out):
+        # Map output index to input position
+        pos = i * 3.0 / 2.0
+        idx = int(pos)
+        frac = pos - idx
+        if idx + 1 < n_in:
+            val = samples_24k[idx] * (1.0 - frac) + samples_24k[idx + 1] * frac
+        else:
+            val = samples_24k[idx] if idx < n_in else 0
+        # Clamp to int16 range
+        val = max(-32768, min(32767, int(val)))
+        samples_16k.append(val)
+
+    return struct.pack(f'<{len(samples_16k)}h', *samples_16k)
+
+
+async def synthesize_tts(text: str) -> list:
+    """Synthesize TTS using OpenAI API and return list of Opus packets"""
+    logger.info(f"TTS: synthesizing '{text[:50]}...' with {settings.openai_tts_model}/{settings.openai_tts_voice}")
+
+    response = await _client.audio.speech.create(
+        model=settings.openai_tts_model,
+        voice=settings.openai_tts_voice,
+        input=text,
+        response_format="pcm",  # Raw PCM16 24kHz mono
+    )
+
+    pcm_24k = response.content
+    logger.info(f"TTS: received {len(pcm_24k)} bytes PCM (24kHz)")
+
+    # Resample 24kHz -> 16kHz to match device expectation
+    pcm_16k = _resample_24k_to_16k(pcm_24k)
+    logger.info(f"TTS: resampled to {len(pcm_16k)} bytes PCM (16kHz)")
 
     # Encode PCM16 to Opus (60ms frames @ 16kHz = 960 samples = 1920 bytes)
-    # Use VOIP application for better compression on voice
     encoder = opuslib.Encoder(settings.pcm_sample_rate, settings.pcm_channels, opuslib.APPLICATION_VOIP)
-
-    # Set explicit bitrate for voice (16-32kbps is typical for voice)
     encoder.bitrate = 24000
 
-    # Enable DTX (discontinuous transmission) for silence suppression
-    try:
-        encoder.complexity = 5  # Lower complexity for faster encoding
-    except:
-        pass
-
     opus_packets = []
-    frame_size = 1920  # 60ms @ 16kHz mono PCM16 = 960 samples * 2 bytes
+    frame_size = 1920  # 960 samples * 2 bytes per sample
 
-    for i in range(0, len(pcm_data), frame_size):
-        frame = pcm_data[i:i+frame_size]
-
-        # Pad last frame if needed
+    for i in range(0, len(pcm_16k), frame_size):
+        frame = pcm_16k[i:i + frame_size]
         if len(frame) < frame_size:
             frame = frame + b'\x00' * (frame_size - len(frame))
-
-        # Encode to Opus
-        opus_packet = encoder.encode(frame, 960)  # 960 samples per 60ms frame
+        opus_packet = encoder.encode(frame, 960)
         opus_packets.append(opus_packet)
 
-        # Debug: log first few packet sizes
-        if len(opus_packets) <= 3:
-            logger.info(f"Opus packet {len(opus_packets)}: {len(opus_packet)} bytes (from {len(frame)} bytes PCM)")
-
-    logger.info(f"Total {len(opus_packets)} packets, sizes: {[len(p) for p in opus_packets[:5]]}")
-
-    # Return list of Opus packets (not concatenated - send individually)
+    logger.info(f"TTS: encoded {len(opus_packets)} Opus packets, sizes: {[len(p) for p in opus_packets[:5]]}")
     return opus_packets
