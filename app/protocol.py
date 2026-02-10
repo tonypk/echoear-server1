@@ -5,6 +5,7 @@ class Hello(BaseModel):
     type: Literal["hello"]
     device_id: Optional[str] = None
     fw: Optional[str] = None
+    listen_mode: Optional[str] = None
 
 class HelloResponse(BaseModel):
     type: Literal["hello"]
@@ -30,6 +31,13 @@ class AudioEnd(BaseModel):
 
 class Abort(BaseModel):
     type: Literal["abort"]
+    reason: Optional[str] = None
+
+class Listen(BaseModel):
+    type: Literal["listen"]
+    state: Literal["start", "stop", "detect"]
+    mode: Optional[str] = None
+    text: Optional[str] = None
 
 class AsrText(BaseModel):
     type: Literal["asr_text"]

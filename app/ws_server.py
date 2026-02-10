@@ -26,6 +26,8 @@ class ConnState:
         self.listening = False
         self.tts_abort = False  # Abort flag for TTS streaming
         self.processing = False  # Whether currently processing audio pipeline
+        self.listen_mode: Optional[str] = None  # "auto", "manual", etc.
+        self.protocol_version: int = 1  # 1=legacy (audio_start/end), 2=xiaozhi (listen)
 
 
 async def handle_text_message(ws: WebSocketServerProtocol, state: ConnState, text: str):
@@ -40,6 +42,13 @@ async def handle_text_message(ws: WebSocketServerProtocol, state: ConnState, tex
     logger.info(f"[{state.session_id}] Device {state.device_id}: {mtype}")
 
     if mtype == "hello":
+        # Extract listen_mode if provided (xiaozhi-style protocol)
+        listen_mode = payload.get("listen_mode")
+        if listen_mode:
+            state.listen_mode = listen_mode
+            state.protocol_version = 2
+            logger.info(f"[{state.session_id}] Xiaozhi protocol v2, listen_mode={listen_mode}")
+
         # Respond with session info and audio parameters
         hello_resp = {
             "type": "hello",
@@ -56,7 +65,7 @@ async def handle_text_message(ws: WebSocketServerProtocol, state: ConnState, tex
                 "llm": True,
                 "abort": True,
             },
-            "version": 1,
+            "version": state.protocol_version,
         }
         await ws.send(json.dumps(hello_resp))
         logger.info(f"[{state.session_id}] Hello handshake complete")
@@ -73,9 +82,38 @@ async def handle_text_message(ws: WebSocketServerProtocol, state: ConnState, tex
         await process_audio(ws, state)
         return
 
+    elif mtype == "listen":
+        # Xiaozhi-style listen protocol
+        listen_state = payload.get("state")
+        listen_mode = payload.get("mode")
+        listen_text = payload.get("text")
+
+        if listen_state == "detect":
+            # Wake word detection notification
+            logger.info(f"[{state.session_id}] Wake detected: text={listen_text}")
+            return
+
+        elif listen_state == "start":
+            # Start listening (equivalent to audio_start)
+            if listen_mode:
+                state.listen_mode = listen_mode
+            state.opus_packets = []
+            state.listening = True
+            state.tts_abort = False
+            logger.info(f"[{state.session_id}] Listen start (mode={listen_mode})")
+            return
+
+        elif listen_state == "stop":
+            # Stop listening (equivalent to audio_end)
+            state.listening = False
+            logger.info(f"[{state.session_id}] Listen stop, processing audio...")
+            await process_audio(ws, state)
+            return
+
     elif mtype == "abort":
         # Client requests TTS abort (user started speaking during playback)
-        logger.info(f"[{state.session_id}] Abort requested by device")
+        reason = payload.get("reason", "unknown")
+        logger.info(f"[{state.session_id}] Abort requested by device (reason={reason})")
         state.tts_abort = True
         # Acknowledge abort
         await ws.send(json.dumps({"type": "tts_end", "reason": "abort"}))
