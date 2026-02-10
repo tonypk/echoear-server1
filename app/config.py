@@ -1,6 +1,9 @@
 from pydantic import BaseModel
 import os
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Load .env file if it exists (before reading os.getenv)
 _env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -16,6 +19,12 @@ if _env_path.exists():
                 if key not in os.environ:
                     os.environ[key] = value
 
+
+def _sanitize_ascii(val: str) -> str:
+    """Strip non-ASCII characters from config values (prevents encoding errors)"""
+    return val.encode('ascii', errors='ignore').decode('ascii').strip()
+
+
 class Settings(BaseModel):
     # Network
     ws_host: str = os.getenv("ECHOEAR_WS_HOST", "0.0.0.0")
@@ -24,16 +33,20 @@ class Settings(BaseModel):
     # Device auth
     device_token_header: str = "x-device-token"
 
-    # OpenAI API
-    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
-    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    openai_chat_model: str = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
-    openai_asr_model: str = os.getenv("OPENAI_ASR_MODEL", "whisper-1")
-    openai_tts_model: str = os.getenv("OPENAI_TTS_MODEL", "tts-1")
-    openai_tts_voice: str = os.getenv("OPENAI_TTS_VOICE", "alloy")
+    # OpenAI API (sanitized to prevent 'ascii' codec errors)
+    openai_api_key: str = _sanitize_ascii(os.getenv("OPENAI_API_KEY", ""))
+    openai_base_url: str = _sanitize_ascii(os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))
+    openai_chat_model: str = _sanitize_ascii(os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"))
+    openai_asr_model: str = _sanitize_ascii(os.getenv("OPENAI_ASR_MODEL", "whisper-1"))
+    openai_tts_model: str = _sanitize_ascii(os.getenv("OPENAI_TTS_MODEL", "tts-1"))
+    openai_tts_voice: str = _sanitize_ascii(os.getenv("OPENAI_TTS_VOICE", "alloy"))
 
     # Audio parameters (PCM16)
     pcm_sample_rate: int = int(os.getenv("PCM_SAMPLE_RATE", "16000"))
     pcm_channels: int = int(os.getenv("PCM_CHANNELS", "1"))
 
 settings = Settings()
+
+# Log config for debugging
+_key_preview = '***' + settings.openai_api_key[-4:] if len(settings.openai_api_key) > 4 else 'EMPTY'
+logger.info(f"Config loaded: base_url={settings.openai_base_url}, model={settings.openai_chat_model}, key={_key_preview}")

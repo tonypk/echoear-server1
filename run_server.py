@@ -3,6 +3,14 @@
 EchoEar Server - Dual server launcher
 Runs both WebSocket server (websockets lib) and HTTP server (FastAPI) concurrently
 """
+import os
+import sys
+
+# Fix encoding issues on servers with ASCII locale
+os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+os.environ.setdefault('LANG', 'en_US.UTF-8')
+os.environ.setdefault('LC_ALL', 'en_US.UTF-8')
+
 import asyncio
 import logging
 import uvicorn
@@ -29,6 +37,7 @@ async def run_http_server():
 async def main():
     """Run both servers concurrently"""
     logger.info("Starting EchoEar servers...")
+    logger.info(f"Python {sys.version}, encoding={sys.getdefaultencoding()}")
     logger.info(f"HTTP admin server will run on http://0.0.0.0:8000")
     logger.info(f"WebSocket server will run on ws://{settings.ws_host}:{settings.ws_port}")
 

@@ -6,6 +6,7 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
+# API key and base_url are already sanitized in config.py
 _client = AsyncOpenAI(
     api_key=settings.openai_api_key,
     base_url=settings.openai_base_url,
