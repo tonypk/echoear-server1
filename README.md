@@ -1,62 +1,65 @@
-# EchoEar Server (MVP)
+# EchoEar Server
 
-WebSocket gateway + ASR/TTS + OpenClaw integration for EchoEar devices.
+WebSocket + HTTP admin server for EchoEar devices. Uses OpenAI for ASR (Whisper), LLM (GPT), and TTS.
+
+## Architecture
+
+```
+Device (ESP32-S3) ──WebSocket:9001──> ws_server.py (websockets)
+                                        ├── ASR: OpenAI Whisper
+                                        ├── LLM: OpenAI GPT
+                                        └── TTS: OpenAI TTS → Opus
+Browser ──HTTP:8000──> main.py (FastAPI)
+                        ├── /health
+                        ├── /admin (web UI)
+                        └── /ota/
+```
 
 ## Quick start
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-export OPENCLAW_URL="http://YOUR_OPENCLAW_HOST:18789/v1/responses"
-export OPENCLAW_TOKEN="..."
-export OPENCLAW_MODEL="openclaw:main"
+# Configure OpenAI
+export OPENAI_API_KEY="sk-..."
+export OPENAI_CHAT_MODEL="gpt-4o-mini"
 
-uvicorn app.main:app --host 0.0.0.0 --port 9001
+# Run both servers
+python run_server.py
 ```
 
 ## Device registration
+
 ```bash
-curl -X POST http://localhost:9001/register \
+curl -X POST http://localhost:8000/register \
   -H 'Content-Type: application/json' \
   -d '{"device_id":"echoear-001","token":"devtoken"}'
 ```
 
-## OTA config
-`GET /ota/` returns websocket URL and protocol version.
+## WebSocket protocol (xiaozhi-compatible)
 
-## WebSocket protocol (MVP)
-Text JSON:
-- `hello`: `{ "type":"hello", "device_id":"...", "fw":"..." }`
-- `wake`: `{ "type":"wake", "device_id":"..." }`
-- `audio_start`: `{ "type":"audio_start", "device_id":"...", "format":"pcm16", "rate":16000, "channels":1 }`
-- `audio_end`: `{ "type":"audio_end", "device_id":"..." }`
+### Device -> Server (text JSON)
+- `hello`: `{"type":"hello","device_id":"...","fw":"...","listen_mode":"auto"}`
+- `listen`: `{"type":"listen","state":"detect|start|stop","mode":"auto","text":"Hi ESP"}`
+- `abort`: `{"type":"abort","reason":"wake_word_detected"}`
 
-Binary:
-- raw PCM16 mono frames after `audio_start`.
+### Device -> Server (binary)
+- Opus packets (60ms frames, 16kHz mono) after `listen(start)`
 
-Server -> device:
-- `asr_text`: `{ "type":"asr_text", "text":"..." }`
+### Server -> Device (text JSON)
+- `hello`: session info + audio params
+- `asr_text`: `{"type":"asr_text","text":"..."}`
 - `tts_start` / `tts_end`
-- Binary PCM16 frames in between.
 
-## ASR service (faster-whisper)
-```bash
-cd services
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r ../requirements-asr.txt
-export WHISPER_MODEL=small
-uvicorn asr_service:app --host 0.0.0.0 --port 9101
-```
+### Server -> Device (binary)
+- Opus packets during TTS playback
 
-## TTS service (Piper)
+## systemd deployment
+
 ```bash
-cd services
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r ../requirements-tts.txt
-export PIPER_BIN=piper
-export PIPER_MODEL=/path/to/model.onnx
-uvicorn tts_service:app --host 0.0.0.0 --port 9102
+sudo cp echoear-server-ws.service /etc/systemd/system/echoear-server.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now echoear-server
 ```

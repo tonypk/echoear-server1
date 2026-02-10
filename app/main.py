@@ -1,40 +1,75 @@
+"""
+EchoEar Server - WebSocket-based implementation
+Uses websockets library for WebSocket connections (xiaozhi-compatible)
+Uses FastAPI for HTTP admin endpoints
+"""
 import asyncio
-import base64
 import json
 import os
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
-from fastapi.responses import JSONResponse, HTMLResponse
+import logging
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from .config import settings
-from .protocol import AsrText, TtsStart, TtsEnd, ErrorMsg
 from .registry import registry
-from .asr import transcribe_pcm
-from .tts import synthesize_tts
-from .openclaw import call_openclaw
+from .ws_server import start_websocket_server
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
-OPENCLAW_CFG_PATH = os.path.join(DATA_DIR, "openclaw.json")
+OPENAI_CFG_PATH = os.path.join(DATA_DIR, "openai.json")
 
 @app.on_event("startup")
-async def load_openclaw_config():
-    pass
+async def load_openai_config():
+    """Load OpenAI configuration from disk"""
+    if os.path.exists(OPENAI_CFG_PATH):
+        try:
+            with open(OPENAI_CFG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            settings.openai_base_url = data.get("openai_base_url", settings.openai_base_url)
+            settings.openai_chat_model = data.get("openai_chat_model", settings.openai_chat_model)
+            settings.openai_tts_model = data.get("openai_tts_model", settings.openai_tts_model)
+            settings.openai_tts_voice = data.get("openai_tts_voice", settings.openai_tts_voice)
+            logger.info("Loaded OpenAI config from disk")
+        except Exception as e:
+            logger.warning(f"Failed to load OpenAI config: {e}")
 
 @app.get("/health")
 async def health():
+    """Health check endpoint"""
     return {"ok": True}
 
 @app.post("/register")
 async def register_device(payload: dict):
+    """Register a new device (legacy endpoint)"""
     device_id = payload.get("device_id")
     token = payload.get("token")
     if not device_id or not token:
         raise HTTPException(status_code=400, detail="device_id and token required")
     registry.register(device_id, token)
+    logger.info(f"Registered device: {device_id}")
     return {"ok": True}
+
+@app.get("/ota/")
+async def ota(request):
+    """Return OTA configuration for devices"""
+    host = request.headers.get("host", f"{settings.ws_host}:{settings.ws_port}")
+    return {
+        "websocket": {
+            "url": f"ws://{host}/ws",
+            "version": 3
+        }
+    }
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_page():
+    """Admin web interface"""
     return """
 <!doctype html>
 <html>
@@ -73,14 +108,16 @@ async def admin_page():
       <tbody></tbody>
     </table>
 
-    <h2>OpenClaw Config</h2>
-    <label>OpenClaw URL</label>
-    <input id="openclaw_url" />
-    <label>OpenClaw Token</label>
-    <input id="openclaw_token" />
-    <label>OpenClaw Model</label>
-    <input id="openclaw_model" />
-    <button onclick="saveOpenclaw()">Save OpenClaw</button>
+    <h2>OpenAI Config</h2>
+    <label>Base URL</label>
+    <input id="openai_base_url" />
+    <label>Chat Model</label>
+    <input id="openai_chat_model" />
+    <label>TTS Model</label>
+    <input id="openai_tts_model" />
+    <label>TTS Voice</label>
+    <input id="openai_tts_voice" />
+    <button onclick="saveOpenai()">Save OpenAI Config</button>
 
     <script>
       async function loadDevices() {
@@ -113,28 +150,30 @@ async def admin_page():
         await loadDevices();
       }
 
-      async function loadOpenclaw() {
-        const res = await fetch('/admin/openclaw');
+      async function loadOpenai() {
+        const res = await fetch('/admin/openai');
         const data = await res.json();
-        document.getElementById('openclaw_url').value = data.openclaw_url || '';
-        document.getElementById('openclaw_token').value = data.openclaw_token || '';
-        document.getElementById('openclaw_model').value = data.openclaw_model || '';
+        document.getElementById('openai_base_url').value = data.openai_base_url || '';
+        document.getElementById('openai_chat_model').value = data.openai_chat_model || '';
+        document.getElementById('openai_tts_model').value = data.openai_tts_model || '';
+        document.getElementById('openai_tts_voice').value = data.openai_tts_voice || '';
       }
 
-      async function saveOpenclaw() {
-        const openclaw_url = document.getElementById('openclaw_url').value.trim();
-        const openclaw_token = document.getElementById('openclaw_token').value.trim();
-        const openclaw_model = document.getElementById('openclaw_model').value.trim();
-        await fetch('/admin/openclaw', {
+      async function saveOpenai() {
+        const openai_base_url = document.getElementById('openai_base_url').value.trim();
+        const openai_chat_model = document.getElementById('openai_chat_model').value.trim();
+        const openai_tts_model = document.getElementById('openai_tts_model').value.trim();
+        const openai_tts_voice = document.getElementById('openai_tts_voice').value.trim();
+        await fetch('/admin/openai', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({openclaw_url, openclaw_token, openclaw_model})
+          body: JSON.stringify({openai_base_url, openai_chat_model, openai_tts_model, openai_tts_voice})
         });
         alert('Saved');
       }
 
       loadDevices();
-      loadOpenclaw();
+      loadOpenai();
     </script>
   </body>
 </html>
@@ -142,175 +181,52 @@ async def admin_page():
 
 @app.get("/admin/devices")
 async def admin_list_devices():
+    """List all registered devices"""
     return {"devices": registry.list_devices()}
 
 @app.post("/admin/devices")
 async def admin_add_device(payload: dict):
+    """Add or update a device"""
     device_id = payload.get("device_id")
     token = payload.get("token")
     if not device_id or not token:
         raise HTTPException(status_code=400, detail="device_id and token required")
     registry.register(device_id, token)
+    logger.info(f"Admin registered device: {device_id}")
     return {"ok": True}
 
 @app.delete("/admin/devices/{device_id}")
 async def admin_delete_device(device_id: str):
+    """Delete a device"""
     if not registry.delete(device_id):
         raise HTTPException(status_code=404, detail="device_id not found")
+    logger.info(f"Admin deleted device: {device_id}")
     return {"ok": True}
 
-@app.get("/admin/openclaw")
-async def admin_get_openclaw():
+@app.get("/admin/openai")
+async def admin_get_openai():
+    """Get OpenAI configuration"""
     return {
-        "openclaw_url": settings.openclaw_url,
-        "openclaw_token": settings.openclaw_token,
-        "openclaw_model": settings.openclaw_model,
+        "openai_base_url": settings.openai_base_url,
+        "openai_chat_model": settings.openai_chat_model,
+        "openai_tts_model": settings.openai_tts_model,
+        "openai_tts_voice": settings.openai_tts_voice,
     }
 
-@app.post("/admin/openclaw")
-async def admin_set_openclaw(payload: dict):
-    openclaw_url = payload.get("openclaw_url", settings.openclaw_url)
-    openclaw_token = payload.get("openclaw_token", settings.openclaw_token)
-    openclaw_model = payload.get("openclaw_model", settings.openclaw_model)
-    settings.openclaw_url = openclaw_url
-    settings.openclaw_token = openclaw_token
-    settings.openclaw_model = openclaw_model
+@app.post("/admin/openai")
+async def admin_set_openai(payload: dict):
+    """Update OpenAI configuration"""
+    settings.openai_base_url = payload.get("openai_base_url", settings.openai_base_url)
+    settings.openai_chat_model = payload.get("openai_chat_model", settings.openai_chat_model)
+    settings.openai_tts_model = payload.get("openai_tts_model", settings.openai_tts_model)
+    settings.openai_tts_voice = payload.get("openai_tts_voice", settings.openai_tts_voice)
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(OPENCLAW_CFG_PATH, "w", encoding="utf-8") as f:
+    with open(OPENAI_CFG_PATH, "w", encoding="utf-8") as f:
         json.dump({
-            "openclaw_url": settings.openclaw_url,
-            "openclaw_token": settings.openclaw_token,
-            "openclaw_model": settings.openclaw_model,
+            "openai_base_url": settings.openai_base_url,
+            "openai_chat_model": settings.openai_chat_model,
+            "openai_tts_model": settings.openai_tts_model,
+            "openai_tts_voice": settings.openai_tts_voice,
         }, f, ensure_ascii=False, indent=2)
+    logger.info("Updated OpenAI config")
     return {"ok": True}
-
-@app.get("/ota/")
-async def ota(request: Request):
-    # Return minimal OTA config for devices
-    host = request.headers.get("host", f"{settings.ws_host}:{settings.ws_port}")
-    return {
-        "websocket": {
-            "url": f"ws://{host}/ws",
-            "version": 3
-        }
-    }
-
-class ConnState:
-    def __init__(self, device_id: str):
-        self.device_id = device_id
-        self.audio_buf = bytearray()
-        self.listening = False
-
-@app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket):
-    await ws.accept()
-
-    device_id = ws.query_params.get("device_id") or ws.headers.get("x-device-id")
-    token = ws.query_params.get("token") or ws.headers.get("x-device-token")
-
-    if not device_id or not token:
-        await ws.send_json(ErrorMsg(type="error", message="missing device_id/token").dict())
-        await ws.close(code=4401)
-        return
-
-    if not registry.is_valid(device_id, token):
-        await ws.send_json(ErrorMsg(type="error", message="invalid token").dict())
-        await ws.close(code=4401)
-        return
-
-    state = ConnState(device_id)
-
-    async def keepalive():
-        """Send application-level ping every 30 seconds to keep connection alive"""
-        try:
-            while True:
-                await asyncio.sleep(30)  # 30 seconds interval
-                await ws.send_json({"type": "ping"})
-        except Exception:
-            return
-
-    ka_task = asyncio.create_task(keepalive())
-
-    try:
-        while True:
-            msg = await ws.receive()
-            msg_type = msg.get("type")
-
-            if msg_type == "websocket.disconnect":
-                break
-            elif "text" in msg and msg["text"]:
-                data = msg["text"]
-                await handle_text_message(ws, state, data)
-            elif "bytes" in msg and msg["bytes"]:
-                await handle_binary_message(ws, state, msg["bytes"])
-    except WebSocketDisconnect:
-        pass
-    finally:
-        ka_task.cancel()
-
-async def handle_text_message(ws: WebSocket, state: ConnState, text: str):
-    # Expect simple JSON messages
-    import json
-    try:
-        payload = json.loads(text)
-    except Exception:
-        await ws.send_json(ErrorMsg(type="error", message="invalid json").dict())
-        return
-
-    mtype = payload.get("type")
-    if mtype == "hello":
-        # No-op, can respond if needed
-        return
-    if mtype == "wake":
-        # Device woke up
-        return
-    if mtype == "audio_start":
-        state.audio_buf = bytearray()
-        state.listening = True
-        return
-    if mtype == "audio_end":
-        state.listening = False
-        await process_audio(ws, state)
-        return
-
-async def handle_binary_message(ws: WebSocket, state: ConnState, chunk: bytes):
-    if not state.listening:
-        return
-    state.audio_buf.extend(chunk)
-
-async def process_audio(ws: WebSocket, state: ConnState):
-    pcm = bytes(state.audio_buf)
-    if not pcm:
-        await ws.send_json(ErrorMsg(type="error", message="empty audio").dict())
-        return
-
-    # ASR
-    try:
-        text = await transcribe_pcm(pcm)
-    except Exception as e:
-        await ws.send_json(ErrorMsg(type="error", message=f"ASR failed: {e}").dict())
-        return
-
-    await ws.send_json(AsrText(type="asr_text", text=text).dict())
-
-    # LLM via OpenClaw
-    try:
-        reply = await call_openclaw(text)
-    except Exception as e:
-        await ws.send_json(ErrorMsg(type="error", message=f"OpenClaw failed: {e}").dict())
-        return
-
-    # TTS
-    try:
-        audio = await synthesize_tts(reply)
-    except Exception as e:
-        await ws.send_json(ErrorMsg(type="error", message=f"TTS failed: {e}").dict())
-        return
-
-    await ws.send_json(TtsStart(type="tts_start").dict())
-    # Chunk PCM for streaming playback
-    chunk_size = 640  # 20ms @ 16kHz mono 16-bit = 640 bytes
-    for i in range(0, len(audio), chunk_size):
-        await ws.send_bytes(audio[i:i+chunk_size])
-        await asyncio.sleep(0)  # yield
-    await ws.send_json(TtsEnd(type="tts_end").dict())

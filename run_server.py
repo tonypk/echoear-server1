@@ -25,14 +25,18 @@ logger = logging.getLogger(__name__)
 
 async def run_http_server():
     """Run FastAPI HTTP server for admin endpoints"""
-    config = uvicorn.Config(
-        "app.main_new:app",
-        host="0.0.0.0",
-        port=8000,  # HTTP admin on port 8000
-        log_level="info"
-    )
-    server = uvicorn.Server(config)
-    await server.serve()
+    try:
+        config = uvicorn.Config(
+            "app.main:app",
+            host="0.0.0.0",
+            port=8000,  # HTTP admin on port 8000
+            log_level="info"
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
+    except Exception as e:
+        logger.error(f"HTTP admin server failed: {e}")
+        logger.warning("WebSocket server will continue running without HTTP admin")
 
 async def main():
     """Run both servers concurrently"""
@@ -41,7 +45,7 @@ async def main():
     logger.info(f"HTTP admin server will run on http://0.0.0.0:8000")
     logger.info(f"WebSocket server will run on ws://{settings.ws_host}:{settings.ws_port}")
 
-    # Run both servers concurrently
+    # Run both servers concurrently; HTTP failure won't kill WebSocket
     await asyncio.gather(
         start_websocket_server(),
         run_http_server()
