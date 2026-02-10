@@ -2,9 +2,10 @@
 import asyncio
 import json
 import logging
-from typing import Optional
+from typing import Optional, List
 import websockets
 from websockets.server import WebSocketServerProtocol
+import opuslib
 
 from .config import settings
 from .protocol import AsrText, TtsStart, TtsEnd, ErrorMsg
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 class ConnState:
     def __init__(self, device_id: str):
         self.device_id = device_id
-        self.audio_buf = bytearray()
+        self.opus_packets: List[bytes] = []  # Store individual Opus packets
         self.listening = False
 
 async def handle_text_message(ws: WebSocketServerProtocol, state: ConnState, text: str):
@@ -39,7 +40,7 @@ async def handle_text_message(ws: WebSocketServerProtocol, state: ConnState, tex
         # Device woke up
         return
     elif mtype == "audio_start":
-        state.audio_buf = bytearray()
+        state.opus_packets = []
         state.listening = True
         return
     elif mtype == "audio_end":
@@ -48,16 +49,29 @@ async def handle_text_message(ws: WebSocketServerProtocol, state: ConnState, tex
         return
 
 async def handle_binary_message(ws: WebSocketServerProtocol, state: ConnState, chunk: bytes):
-    """Accumulate audio chunks"""
+    """Accumulate Opus audio packets"""
     if not state.listening:
         return
-    state.audio_buf.extend(chunk)
+    state.opus_packets.append(bytes(chunk))
 
 async def process_audio(ws: WebSocketServerProtocol, state: ConnState):
-    """Process accumulated audio: ASR -> LLM -> TTS"""
-    pcm = bytes(state.audio_buf)
-    if not pcm:
+    """Process accumulated audio: Opus decode -> ASR -> LLM -> TTS"""
+    if not state.opus_packets:
         await ws.send(json.dumps({"type": "error", "message": "empty audio"}))
+        return
+
+    # Decode Opus packets to raw PCM
+    try:
+        decoder = opuslib.Decoder(settings.pcm_sample_rate, settings.pcm_channels)
+        pcm_frames = []
+        for packet in state.opus_packets:
+            pcm_frame = decoder.decode(packet, 960)  # 960 samples = 60ms @ 16kHz
+            pcm_frames.append(pcm_frame)
+        pcm = b''.join(pcm_frames)
+        logger.info(f"Decoded {len(state.opus_packets)} Opus packets to {len(pcm)} bytes PCM")
+    except Exception as e:
+        logger.error(f"Opus decode failed: {e}")
+        await ws.send(json.dumps({"type": "error", "message": f"Opus decode failed: {e}"}))
         return
 
     # ASR
