@@ -33,13 +33,21 @@ class Settings(BaseModel):
     # Device auth
     device_token_header: str = "x-device-token"
 
-    # OpenAI API (sanitized to prevent 'ascii' codec errors)
+    # OpenAI API for ASR/TTS (sanitized to prevent 'ascii' codec errors)
     openai_api_key: str = _sanitize_ascii(os.getenv("OPENAI_API_KEY", ""))
     openai_base_url: str = _sanitize_ascii(os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))
-    openai_chat_model: str = _sanitize_ascii(os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"))
     openai_asr_model: str = _sanitize_ascii(os.getenv("OPENAI_ASR_MODEL", "whisper-1"))
     openai_tts_model: str = _sanitize_ascii(os.getenv("OPENAI_TTS_MODEL", "tts-1"))
     openai_tts_voice: str = _sanitize_ascii(os.getenv("OPENAI_TTS_VOICE", "alloy"))
+
+    # Intent Planning (OpenAI GPT for understanding user intent)
+    intent_model: str = _sanitize_ascii(os.getenv("INTENT_MODEL", os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")))
+
+    # OpenClaw Execution (agent that performs real-world tasks)
+    openclaw_base_url: str = _sanitize_ascii(os.getenv("OPENCLAW_URL", ""))
+    openclaw_token: str = _sanitize_ascii(os.getenv("OPENCLAW_TOKEN", ""))
+    openclaw_model: str = _sanitize_ascii(os.getenv("OPENCLAW_MODEL", "claude"))
+    openclaw_timeout: int = int(os.getenv("OPENCLAW_TIMEOUT", "30"))
 
     # Audio parameters (PCM16)
     pcm_sample_rate: int = int(os.getenv("PCM_SAMPLE_RATE", "16000"))
@@ -48,5 +56,8 @@ class Settings(BaseModel):
 settings = Settings()
 
 # Log config for debugging
-_key_preview = '***' + settings.openai_api_key[-4:] if len(settings.openai_api_key) > 4 else 'EMPTY'
-logger.info(f"Config loaded: base_url={settings.openai_base_url}, model={settings.openai_chat_model}, key={_key_preview}")
+_oai_key = '***' + settings.openai_api_key[-4:] if len(settings.openai_api_key) > 4 else 'EMPTY'
+_claw_key = '***' + settings.openclaw_token[-4:] if len(settings.openclaw_token) > 4 else 'EMPTY'
+logger.info(f"Config: ASR/TTS → {settings.openai_base_url} (key={_oai_key})")
+logger.info(f"Config: Intent → {settings.openai_base_url}, model={settings.intent_model}")
+logger.info(f"Config: OpenClaw → {settings.openclaw_base_url or 'DISABLED'}, model={settings.openclaw_model} (key={_claw_key})")

@@ -184,7 +184,7 @@ async def process_audio(ws: WebSocketServerProtocol, state: ConnState):
         state.processing = False
         return
 
-    # LLM via OpenAI GPT
+    # LLM (intent planning + optional OpenClaw execution)
     try:
         reply = await call_llm(text, session_id=state.session_id)
         logger.info(f"[{state.session_id}] LLM reply: {reply}")
