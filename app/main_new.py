@@ -23,21 +23,22 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
-OPENCLAW_CFG_PATH = os.path.join(DATA_DIR, "openclaw.json")
+OPENAI_CFG_PATH = os.path.join(DATA_DIR, "openai.json")
 
 @app.on_event("startup")
-async def load_openclaw_config():
-    """Load OpenClaw configuration from disk"""
-    if os.path.exists(OPENCLAW_CFG_PATH):
+async def load_openai_config():
+    """Load OpenAI configuration from disk"""
+    if os.path.exists(OPENAI_CFG_PATH):
         try:
-            with open(OPENCLAW_CFG_PATH, "r", encoding="utf-8") as f:
+            with open(OPENAI_CFG_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            settings.openclaw_url = data.get("openclaw_url", settings.openclaw_url)
-            settings.openclaw_token = data.get("openclaw_token", settings.openclaw_token)
-            settings.openclaw_model = data.get("openclaw_model", settings.openclaw_model)
-            logger.info("Loaded OpenClaw config from disk")
+            settings.openai_base_url = data.get("openai_base_url", settings.openai_base_url)
+            settings.openai_chat_model = data.get("openai_chat_model", settings.openai_chat_model)
+            settings.openai_tts_model = data.get("openai_tts_model", settings.openai_tts_model)
+            settings.openai_tts_voice = data.get("openai_tts_voice", settings.openai_tts_voice)
+            logger.info("Loaded OpenAI config from disk")
         except Exception as e:
-            logger.warning(f"Failed to load OpenClaw config: {e}")
+            logger.warning(f"Failed to load OpenAI config: {e}")
 
 @app.get("/health")
 async def health():
@@ -107,14 +108,16 @@ async def admin_page():
       <tbody></tbody>
     </table>
 
-    <h2>OpenClaw Config</h2>
-    <label>OpenClaw URL</label>
-    <input id="openclaw_url" />
-    <label>OpenClaw Token</label>
-    <input id="openclaw_token" />
-    <label>OpenClaw Model</label>
-    <input id="openclaw_model" />
-    <button onclick="saveOpenclaw()">Save OpenClaw</button>
+    <h2>OpenAI Config</h2>
+    <label>Base URL</label>
+    <input id="openai_base_url" />
+    <label>Chat Model</label>
+    <input id="openai_chat_model" />
+    <label>TTS Model</label>
+    <input id="openai_tts_model" />
+    <label>TTS Voice</label>
+    <input id="openai_tts_voice" />
+    <button onclick="saveOpenai()">Save OpenAI Config</button>
 
     <script>
       async function loadDevices() {
@@ -147,28 +150,30 @@ async def admin_page():
         await loadDevices();
       }
 
-      async function loadOpenclaw() {
-        const res = await fetch('/admin/openclaw');
+      async function loadOpenai() {
+        const res = await fetch('/admin/openai');
         const data = await res.json();
-        document.getElementById('openclaw_url').value = data.openclaw_url || '';
-        document.getElementById('openclaw_token').value = data.openclaw_token || '';
-        document.getElementById('openclaw_model').value = data.openclaw_model || '';
+        document.getElementById('openai_base_url').value = data.openai_base_url || '';
+        document.getElementById('openai_chat_model').value = data.openai_chat_model || '';
+        document.getElementById('openai_tts_model').value = data.openai_tts_model || '';
+        document.getElementById('openai_tts_voice').value = data.openai_tts_voice || '';
       }
 
-      async function saveOpenclaw() {
-        const openclaw_url = document.getElementById('openclaw_url').value.trim();
-        const openclaw_token = document.getElementById('openclaw_token').value.trim();
-        const openclaw_model = document.getElementById('openclaw_model').value.trim();
-        await fetch('/admin/openclaw', {
+      async function saveOpenai() {
+        const openai_base_url = document.getElementById('openai_base_url').value.trim();
+        const openai_chat_model = document.getElementById('openai_chat_model').value.trim();
+        const openai_tts_model = document.getElementById('openai_tts_model').value.trim();
+        const openai_tts_voice = document.getElementById('openai_tts_voice').value.trim();
+        await fetch('/admin/openai', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({openclaw_url, openclaw_token, openclaw_model})
+          body: JSON.stringify({openai_base_url, openai_chat_model, openai_tts_model, openai_tts_voice})
         });
         alert('Saved');
       }
 
       loadDevices();
-      loadOpenclaw();
+      loadOpenai();
     </script>
   </body>
 </html>
@@ -198,30 +203,30 @@ async def admin_delete_device(device_id: str):
     logger.info(f"Admin deleted device: {device_id}")
     return {"ok": True}
 
-@app.get("/admin/openclaw")
-async def admin_get_openclaw():
-    """Get OpenClaw configuration"""
+@app.get("/admin/openai")
+async def admin_get_openai():
+    """Get OpenAI configuration"""
     return {
-        "openclaw_url": settings.openclaw_url,
-        "openclaw_token": settings.openclaw_token,
-        "openclaw_model": settings.openclaw_model,
+        "openai_base_url": settings.openai_base_url,
+        "openai_chat_model": settings.openai_chat_model,
+        "openai_tts_model": settings.openai_tts_model,
+        "openai_tts_voice": settings.openai_tts_voice,
     }
 
-@app.post("/admin/openclaw")
-async def admin_set_openclaw(payload: dict):
-    """Update OpenClaw configuration"""
-    openclaw_url = payload.get("openclaw_url", settings.openclaw_url)
-    openclaw_token = payload.get("openclaw_token", settings.openclaw_token)
-    openclaw_model = payload.get("openclaw_model", settings.openclaw_model)
-    settings.openclaw_url = openclaw_url
-    settings.openclaw_token = openclaw_token
-    settings.openclaw_model = openclaw_model
+@app.post("/admin/openai")
+async def admin_set_openai(payload: dict):
+    """Update OpenAI configuration"""
+    settings.openai_base_url = payload.get("openai_base_url", settings.openai_base_url)
+    settings.openai_chat_model = payload.get("openai_chat_model", settings.openai_chat_model)
+    settings.openai_tts_model = payload.get("openai_tts_model", settings.openai_tts_model)
+    settings.openai_tts_voice = payload.get("openai_tts_voice", settings.openai_tts_voice)
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(OPENCLAW_CFG_PATH, "w", encoding="utf-8") as f:
+    with open(OPENAI_CFG_PATH, "w", encoding="utf-8") as f:
         json.dump({
-            "openclaw_url": settings.openclaw_url,
-            "openclaw_token": settings.openclaw_token,
-            "openclaw_model": settings.openclaw_model,
+            "openai_base_url": settings.openai_base_url,
+            "openai_chat_model": settings.openai_chat_model,
+            "openai_tts_model": settings.openai_tts_model,
+            "openai_tts_voice": settings.openai_tts_voice,
         }, f, ensure_ascii=False, indent=2)
-    logger.info("Updated OpenClaw config")
+    logger.info("Updated OpenAI config")
     return {"ok": True}

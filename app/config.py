@@ -1,5 +1,20 @@
 from pydantic import BaseModel
 import os
+from pathlib import Path
+
+# Load .env file if it exists (before reading os.getenv)
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+if _env_path.exists():
+    with open(_env_path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                # Only set if not already in environment (env vars take precedence)
+                if key not in os.environ:
+                    os.environ[key] = value
 
 class Settings(BaseModel):
     # Network
