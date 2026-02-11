@@ -273,7 +273,7 @@ async def _execute_with_hint(ws, session, intent: dict):
         except asyncio.TimeoutError:
             # OpenClaw still working — send silence to prevent device 5s timeout
             await ws_send_safe(ws, silence_blob, session, "silence")
-            logger.debug(f"[{sid}] Silence keepalive sent ({time.monotonic()-t0:.0f}s)")
+            logger.info(f"[{sid}] Silence keepalive sent ({time.monotonic()-t0:.0f}s)")
 
     if session.tts_abort or ws.closed:
         await ws_send_safe(ws, json.dumps({"type": "tts_end"}), session, "tts_end")
@@ -298,7 +298,7 @@ async def _execute_with_hint(ws, session, intent: dict):
             await asyncio.wait_for(asyncio.shield(tts_task), timeout=2.0)
         except asyncio.TimeoutError:
             await ws_send_safe(ws, silence_blob, session, "silence")
-            logger.debug(f"[{sid}] Silence keepalive during TTS synth ({time.monotonic()-t0:.0f}s)")
+            logger.info(f"[{sid}] Silence keepalive during TTS synth ({time.monotonic()-t0:.0f}s)")
 
     if session.tts_abort or ws.closed:
         await ws_send_safe(ws, json.dumps({"type": "tts_end"}), session, "tts_end")

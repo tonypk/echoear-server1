@@ -1,4 +1,4 @@
-import io
+import asyncio
 import logging
 import struct
 import opuslib
@@ -51,11 +51,20 @@ async def synthesize_tts(text: str) -> list:
     pcm_24k = response.content
     logger.info(f"TTS: received {len(pcm_24k)} bytes PCM (24kHz)")
 
-    # Resample 24kHz -> 16kHz to match device expectation
+    # Run CPU-bound resample + Opus encode in thread pool to avoid blocking event loop.
+    # Blocking the event loop prevents silence keepalive during OpenClaw execution.
+    loop = asyncio.get_event_loop()
+    opus_packets = await loop.run_in_executor(None, _resample_and_encode, pcm_24k)
+
+    logger.info(f"TTS: encoded {len(opus_packets)} Opus packets, sizes: {[len(p) for p in opus_packets[:5]]}")
+    return opus_packets
+
+
+def _resample_and_encode(pcm_24k: bytes) -> list:
+    """CPU-bound: resample 24k→16k + Opus encode. Runs in thread pool."""
     pcm_16k = _resample_24k_to_16k(pcm_24k)
     logger.info(f"TTS: resampled to {len(pcm_16k)} bytes PCM (16kHz)")
 
-    # Encode PCM16 to Opus (60ms frames @ 16kHz = 960 samples = 1920 bytes)
     encoder = opuslib.Encoder(settings.pcm_sample_rate, settings.pcm_channels, opuslib.APPLICATION_VOIP)
     encoder.bitrate = 24000
 
@@ -69,5 +78,4 @@ async def synthesize_tts(text: str) -> list:
         opus_packet = encoder.encode(frame, 960)
         opus_packets.append(opus_packet)
 
-    logger.info(f"TTS: encoded {len(opus_packets)} Opus packets, sizes: {[len(p) for p in opus_packets[:5]]}")
     return opus_packets
