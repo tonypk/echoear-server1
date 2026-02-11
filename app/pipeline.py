@@ -158,11 +158,23 @@ async def _decode_and_asr(ws, session) -> Optional[str]:
     return text
 
 
-async def _process_and_speak(ws, session, text: str):
-    """Intent planning → optional hint TTS → OpenClaw/chat → result TTS.
+def _encode_silence_packet() -> bytes:
+    """Encode a single 60ms silence Opus packet for keepalive during OpenClaw."""
+    encoder = opuslib.Encoder(16000, 1, opuslib.APPLICATION_VOIP)
+    silence_pcm = b'\x00' * (960 * 2)  # 960 samples * 2 bytes = 60ms
+    return encoder.encode(silence_pcm, 960)
 
-    For EXECUTE intents: immediately speaks the hint (e.g. "Searching for news...")
-    so the user gets feedback while OpenClaw works (30-90s).
+
+# Pre-encode silence at module load
+_SILENCE_OPUS = _encode_silence_packet()
+
+
+async def _process_and_speak(ws, session, text: str):
+    """Intent planning → TTS → optional OpenClaw with keepalive → result TTS.
+
+    For EXECUTE intents: uses a SINGLE tts_start...tts_end session:
+      tts_start → hint audio → [silence keepalive every 2s] → result audio → tts_end
+    Device stays in SPEAKING state the entire time (no 5s timeout trigger).
     """
     sid = session.session_id
 
@@ -177,33 +189,8 @@ async def _process_and_speak(ws, session, text: str):
         logger.info(f"[{sid}] Intent: {action} ({time.monotonic()-t0:.2f}s)")
 
         if action == "execute":
-            hint = intent.get("reply_hint", "Processing your request...")
-            task = intent.get("task", text)
-
-            # --- Phase 1: Speak the hint immediately ---
-            logger.info(f"[{sid}] Hint TTS: '{hint}'")
-            try:
-                hint_packets = await synthesize_tts(hint)
-                await _send_tts_round(ws, session, hint_packets, hint)
-            except Exception as e:
-                logger.warning(f"[{sid}] Hint TTS failed: {e}")
-
-            if session.tts_abort or ws.closed:
-                return
-
-            # --- Phase 2: Execute OpenClaw (slow, 10-90s) ---
-            t0 = time.monotonic()
-            try:
-                result = await execute_task(task)
-                logger.info(f"[{sid}] OpenClaw: '{result[:80]}' ({time.monotonic()-t0:.1f}s)")
-            except Exception as e:
-                logger.error(f"[{sid}] OpenClaw failed: {e}")
-                result = "Sorry, I couldn't complete that task right now."
-
-            if session.tts_abort or ws.closed:
-                return
-
-            reply = result
+            await _execute_with_hint(ws, session, intent)
+            return
         else:
             reply = intent.get("response", "I'm not sure how to help with that.")
     else:
@@ -220,7 +207,7 @@ async def _process_and_speak(ws, session, text: str):
     if session.tts_abort or ws.closed:
         return
 
-    # --- Final TTS: speak the result ---
+    # --- Normal TTS for chat responses ---
     try:
         opus_packets = await synthesize_tts(reply)
         logger.info(f"[{sid}] TTS synth: {len(opus_packets)} packets")
@@ -233,6 +220,91 @@ async def _process_and_speak(ws, session, text: str):
         return
 
     await _send_tts_round(ws, session, opus_packets, reply)
+
+
+async def _execute_with_hint(ws, session, intent: dict):
+    """Handle EXECUTE intent: hint → silence keepalive → result, all in one TTS session.
+
+    Timeline:
+      [0s]  tts_start (hint text)
+      [0s]  hint opus packets (~2s audio)
+      [2s]  silence packet every 2s while OpenClaw works
+      [30s] result opus packets
+      [35s] tts_end
+    """
+    sid = session.session_id
+    hint = intent.get("reply_hint", "Processing your request...")
+    task = intent.get("task", "")
+
+    # --- Synthesize hint audio ---
+    try:
+        hint_packets = await synthesize_tts(hint)
+        logger.info(f"[{sid}] Hint TTS: '{hint}' ({len(hint_packets)} packets)")
+    except Exception as e:
+        logger.warning(f"[{sid}] Hint TTS failed: {e}")
+        hint_packets = []
+
+    # --- Open single TTS session ---
+    ok = await ws_send_safe(ws, json.dumps({"type": "tts_start", "text": hint}), session, "tts_start")
+    if not ok:
+        return
+
+    # --- Send hint audio ---
+    if hint_packets:
+        await _stream_batched(ws, session, hint_packets)
+
+    if session.tts_abort or ws.closed:
+        await ws_send_safe(ws, json.dumps({"type": "tts_end"}), session, "tts_end")
+        return
+
+    # --- Execute OpenClaw with silence keepalive ---
+    t0 = time.monotonic()
+    logger.info(f"[{sid}] OpenClaw starting (sending silence keepalive every 2s)...")
+    openclaw_task = asyncio.create_task(execute_task(task))
+
+    silence_blob = struct.pack('>H', len(_SILENCE_OPUS)) + _SILENCE_OPUS
+
+    while not openclaw_task.done():
+        if session.tts_abort or ws.closed:
+            openclaw_task.cancel()
+            break
+        try:
+            await asyncio.wait_for(asyncio.shield(openclaw_task), timeout=2.0)
+        except asyncio.TimeoutError:
+            # OpenClaw still working — send silence to prevent device 5s timeout
+            await ws_send_safe(ws, silence_blob, session, "silence")
+            logger.debug(f"[{sid}] Silence keepalive sent ({time.monotonic()-t0:.0f}s)")
+
+    if session.tts_abort or ws.closed:
+        await ws_send_safe(ws, json.dumps({"type": "tts_end"}), session, "tts_end")
+        return
+
+    # --- Get OpenClaw result ---
+    try:
+        result = openclaw_task.result()
+        logger.info(f"[{sid}] OpenClaw: '{result[:80]}' ({time.monotonic()-t0:.1f}s)")
+    except Exception as e:
+        logger.error(f"[{sid}] OpenClaw failed: {e}")
+        result = "Sorry, I couldn't complete that task right now."
+
+    # --- Synthesize and send result audio (still in same TTS session) ---
+    try:
+        result_packets = await synthesize_tts(result)
+        logger.info(f"[{sid}] Result TTS: {len(result_packets)} packets")
+    except Exception as e:
+        logger.error(f"[{sid}] Result TTS failed: {e}")
+        await ws_send_safe(ws, json.dumps({"type": "tts_end"}), session, "tts_end")
+        return
+
+    if session.tts_abort or ws.closed:
+        await ws_send_safe(ws, json.dumps({"type": "tts_end"}), session, "tts_end")
+        return
+
+    await _stream_batched(ws, session, result_packets)
+
+    # --- Close TTS session ---
+    await ws_send_safe(ws, json.dumps({"type": "tts_end"}), session, "tts_end")
+    logger.info(f"[{sid}] Execute pipeline complete: hint + {len(result_packets)} result packets")
 
 
 BATCH_SIZE = 10       # 10 opus packets per WS message (~2KB, fits in one TCP segment)
