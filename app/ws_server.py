@@ -291,9 +291,12 @@ async def _process_audio_inner(ws, state, pipeline_t0):
     logger.info(f"[{state.session_id}] TTS stream start: {len(opus_packets)} packets, "
                 f"abort={state.tts_abort}, closed={ws.closed}, processing={state.processing}")
 
-    BURST_COUNT = 20       # Pre-buffer packets (20 x 60ms = 1.2s of audio)
-    BURST_INTERVAL = 0.01  # 10ms between burst packets
-    SUSTAIN_INTERVAL = 0.05  # 50ms sustain (vs 60ms real-time = 10ms margin)
+    # Steady-rate pacing: NO burst. Phone hotspot NATs can drop connections
+    # when they see a sudden burst of small packets at 10ms intervals.
+    # Instead, send all packets at a consistent 20ms interval.
+    # Device has 24-slot playback queue (1.44s buffer) so 20ms is fast enough
+    # to keep the queue fed while being gentle on the network.
+    SEND_INTERVAL = 0.020  # 20ms between all packets (vs 60ms real-time = 40ms margin)
 
     sent_count = 0
     send_errors = 0
@@ -315,7 +318,6 @@ async def _process_audio_inner(ws, state, pipeline_t0):
         if ok:
             sent_count += 1
             send_errors = 0
-            # Log slow sends (>100ms) as warnings — indicates TCP backpressure
             if send_dt > 0.1:
                 logger.warning(f"[{state.session_id}] Slow send pkt#{i}: {send_dt:.3f}s ({len(packet)}B)")
         else:
@@ -328,16 +330,13 @@ async def _process_audio_inner(ws, state, pipeline_t0):
             await asyncio.sleep(0.01)
             continue
 
-        # Log progress (first 5 packets individually for debugging 5-packet issue)
+        # Log progress
         if sent_count <= 5 or sent_count % 20 == 0:
             logger.info(f"[{state.session_id}] TTS sent #{sent_count}/{len(opus_packets)} "
                        f"({len(packet)}B, send={send_dt*1000:.1f}ms)")
 
-        # Drift-free pacing
-        if i < BURST_COUNT:
-            target = t0 + (i + 1) * BURST_INTERVAL
-        else:
-            target = t0 + BURST_COUNT * BURST_INTERVAL + (i + 1 - BURST_COUNT) * SUSTAIN_INTERVAL
+        # Steady-rate pacing: absolute time targets prevent drift
+        target = t0 + (i + 1) * SEND_INTERVAL
         sleep_time = target - time.monotonic()
         if sleep_time > 0:
             await asyncio.sleep(sleep_time)
@@ -412,8 +411,11 @@ async def start_websocket_server():
         # Disable server-side pings: device uses TCP keepalive instead
         ping_interval=None,
         ping_timeout=None,
-        # Increase write buffer to handle TTS burst sending
-        write_limit=2**18,  # 256KB (default 64KB)
+        # Small write buffer to detect TCP congestion quickly.
+        # With 256KB (old), ws.send() never blocks for ~21KB of TTS data,
+        # hiding the fact that TCP stalled after 5 packets through phone hotspot.
+        # With 4KB, after ~22 buffered packets ws.send() blocks → 2s timeout fires.
+        write_limit=4096,   # 4KB — enables TCP backpressure detection
         max_queue=64,       # Allow more incoming messages to buffer
     ):
         logger.info(f"WebSocket server listening on ws://{settings.ws_host}:{settings.ws_port}/ws")
