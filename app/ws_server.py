@@ -7,15 +7,20 @@ import asyncio
 import json
 import logging
 import traceback
+from datetime import datetime
 
 import websockets
 from websockets.server import WebSocketServerProtocol
+from sqlalchemy import select
 
 from .config import settings
-from .session import Session
+from .session import Session, UserConfig
 from .pipeline import run_pipeline, ws_send_safe
 from .registry import registry
 from .llm import reset_conversation
+from .database import async_session_factory
+from .models import Device, UserSettings
+from .auth import verify_token, decrypt_secret
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +149,50 @@ async def _pipeline_wrapper(ws: WebSocketServerProtocol, session: Session):
             pass
 
 
+async def _load_user_config(device_id: str, token: str) -> UserConfig | None:
+    """Query DB for device → user → settings. Returns UserConfig or None."""
+    try:
+        async with async_session_factory() as db:
+            result = await db.execute(select(Device).where(Device.device_id == device_id))
+            device = result.scalar_one_or_none()
+            if not device:
+                return None
+            if not verify_token(token, device.token_hash):
+                return None
+
+            # Update last_seen
+            device.last_seen = datetime.utcnow()
+            await db.commit()
+
+            if not device.user_id:
+                # Device exists but unbound — auth OK, no per-user config
+                return UserConfig()
+
+            # Load user settings
+            result = await db.execute(
+                select(UserSettings).where(UserSettings.user_id == device.user_id)
+            )
+            us = result.scalar_one_or_none()
+            if not us:
+                return UserConfig(user_id=device.user_id)
+
+            return UserConfig(
+                user_id=device.user_id,
+                openai_api_key=decrypt_secret(us.openai_api_key_enc) if us.openai_api_key_enc else "",
+                openai_base_url=us.openai_base_url or "",
+                openai_chat_model=us.openai_chat_model or "",
+                openai_asr_model=us.openai_asr_model or "",
+                openai_tts_model=us.openai_tts_model or "",
+                openai_tts_voice=us.openai_tts_voice or "",
+                openclaw_url=us.openclaw_url or "",
+                openclaw_token=decrypt_secret(us.openclaw_token_enc) if us.openclaw_token_enc else "",
+                openclaw_model=us.openclaw_model or "",
+            )
+    except Exception as e:
+        logger.error(f"DB auth error for {device_id}: {e}")
+        return None
+
+
 async def handle_client(ws: WebSocketServerProtocol, path: str):
     """Main WebSocket connection handler — auth, message loop, cleanup."""
     device_id = ws.request_headers.get("x-device-id")
@@ -157,14 +206,20 @@ async def handle_client(ws: WebSocketServerProtocol, path: str):
         await ws.close(code=4401, reason="missing credentials")
         return
 
-    if not registry.is_valid(device_id, token):
+    # Try DB auth first, fallback to legacy registry
+    user_config = await _load_user_config(device_id, token)
+    if user_config is None and not registry.is_valid(device_id, token):
         logger.warning(f"Invalid token for device {device_id}")
         await ws_send_safe(ws, json.dumps({"type": "error", "message": "invalid token"}), Session("unknown"))
         await ws.close(code=4401, reason="invalid token")
         return
 
     session = Session(device_id)
-    logger.info(f"[{session.session_id}] Device {device_id} authenticated, session started")
+    if user_config:
+        session.config = user_config
+        logger.info(f"[{session.session_id}] Device {device_id} authenticated via DB (user_id={user_config.user_id})")
+    else:
+        logger.info(f"[{session.session_id}] Device {device_id} authenticated via legacy registry")
 
     try:
         async for message in ws:

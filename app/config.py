@@ -53,6 +53,9 @@ class Settings(BaseModel):
     openclaw_model: str = _sanitize_ascii(os.getenv("OPENCLAW_MODEL", "claude"))
     openclaw_timeout: int = int(os.getenv("OPENCLAW_TIMEOUT", "30"))
 
+    # Auth / DB
+    secret_key: str = os.getenv("SECRET_KEY", "change-me-in-production-please")
+
     # Audio parameters (PCM16)
     pcm_sample_rate: int = int(os.getenv("PCM_SAMPLE_RATE", "16000"))
     pcm_channels: int = int(os.getenv("PCM_CHANNELS", "1"))

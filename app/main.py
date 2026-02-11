@@ -1,19 +1,18 @@
 """
-EchoEar Server - WebSocket-based implementation
-Uses websockets library for WebSocket connections (xiaozhi-compatible)
-Uses FastAPI for HTTP admin endpoints
+EchoEar Server - FastAPI HTTP endpoints + admin dashboard.
+WebSocket server runs separately via ws_server.py (launched by run_server.py).
 """
-import asyncio
 import json
 import os
 import logging
-from fastapi import FastAPI, HTTPException
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
+
 from .config import settings
 from .registry import registry
-from .ws_server import start_websocket_server
+from .api import router as api_router
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -21,13 +20,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+app.include_router(api_router)
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 OPENAI_CFG_PATH = os.path.join(DATA_DIR, "openai.json")
 
+
 @app.on_event("startup")
-async def load_openai_config():
-    """Load OpenAI configuration from disk"""
+async def on_startup():
+    """Initialize database and load legacy config."""
+    from .database import init_db
+    await init_db()
+
+    # Load legacy openai.json config (backward compat)
     if os.path.exists(OPENAI_CFG_PATH):
         try:
             with open(OPENAI_CFG_PATH, "r", encoding="utf-8") as f:
@@ -36,18 +41,19 @@ async def load_openai_config():
             settings.openai_chat_model = data.get("openai_chat_model", settings.openai_chat_model)
             settings.openai_tts_model = data.get("openai_tts_model", settings.openai_tts_model)
             settings.openai_tts_voice = data.get("openai_tts_voice", settings.openai_tts_voice)
-            logger.info("Loaded OpenAI config from disk")
+            logger.info("Loaded legacy OpenAI config from disk")
         except Exception as e:
             logger.warning(f"Failed to load OpenAI config: {e}")
 
+
+# ── Legacy endpoints (backward compat) ───────────────────────
+
 @app.get("/health")
 async def health():
-    """Health check endpoint"""
     return {"ok": True}
 
 @app.post("/register")
 async def register_device(payload: dict):
-    """Register a new device (legacy endpoint)"""
     device_id = payload.get("device_id")
     token = payload.get("token")
     if not device_id or not token:
@@ -57,176 +63,326 @@ async def register_device(payload: dict):
     return {"ok": True}
 
 @app.get("/ota/")
-async def ota(request):
-    """Return OTA configuration for devices"""
+async def ota(request: Request):
     host = request.headers.get("host", f"{settings.ws_host}:{settings.ws_port}")
-    return {
-        "websocket": {
-            "url": f"ws://{host}/ws",
-            "version": 3
-        }
-    }
+    return {"websocket": {"url": f"ws://{host}/ws", "version": 3}}
+
+
+# ── Admin dashboard ───────────────────────────────────────────
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_page():
-    """Admin web interface"""
-    return """
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>EchoEar Admin</title>
-    <style>
-      body { font-family: sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; }
-      h2 { margin-top: 24px; }
-      table { border-collapse: collapse; width: 100%; }
-      th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; }
-      input { padding: 6px; margin: 4px 0; width: 100%; }
-      button { padding: 6px 10px; margin-top: 6px; }
-      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-      .danger { background: #b30000; color: white; border: none; }
-    </style>
-  </head>
-  <body>
-    <h1>EchoEar Admin</h1>
+    return _ADMIN_HTML
 
-    <h2>Devices</h2>
-    <div class="row">
-      <div>
-        <label>Device ID</label>
-        <input id="device_id" placeholder="echoear-001" />
+
+_ADMIN_HTML = """<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>EchoEar Admin</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+           background: #f5f5f5; color: #333; }
+    .container { max-width: 640px; margin: 0 auto; padding: 16px; }
+    h1 { text-align: center; padding: 20px 0 8px; font-size: 1.5em; }
+    .subtitle { text-align: center; color: #888; font-size: 0.9em; margin-bottom: 20px; }
+
+    /* Tabs */
+    .tabs { display: flex; border-bottom: 2px solid #ddd; margin-bottom: 16px; }
+    .tab { padding: 10px 20px; cursor: pointer; border-bottom: 2px solid transparent;
+           margin-bottom: -2px; font-weight: 500; color: #666; }
+    .tab.active { color: #2563eb; border-bottom-color: #2563eb; }
+
+    /* Cards */
+    .card { background: white; border-radius: 8px; padding: 16px; margin-bottom: 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .card h3 { margin-bottom: 12px; font-size: 1.1em; }
+
+    /* Forms */
+    label { display: block; font-size: 0.85em; color: #555; margin: 8px 0 4px; font-weight: 500; }
+    input { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px;
+            font-size: 0.95em; }
+    input:focus { outline: none; border-color: #2563eb; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+    /* Buttons */
+    .btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+           font-size: 0.9em; font-weight: 500; }
+    .btn-primary { background: #2563eb; color: white; }
+    .btn-danger { background: #dc2626; color: white; }
+    .btn-sm { padding: 4px 10px; font-size: 0.8em; }
+    .btn:hover { opacity: 0.9; }
+
+    /* Table */
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px; text-align: left; border-bottom: 1px solid #eee; font-size: 0.9em; }
+    th { color: #888; font-weight: 500; }
+
+    /* Messages */
+    .msg { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 0.9em; display: none; }
+    .msg-ok { background: #dcfce7; color: #166534; }
+    .msg-err { background: #fee2e2; color: #991b1b; }
+
+    /* Auth page */
+    #auth-page { max-width: 360px; margin: 60px auto; }
+    #auth-page h2 { margin-bottom: 16px; }
+
+    .hidden { display: none; }
+    .mt { margin-top: 12px; }
+    .text-center { text-align: center; }
+    .text-sm { font-size: 0.85em; color: #666; }
+    a { color: #2563eb; cursor: pointer; }
+  </style>
+</head>
+<body>
+
+<!-- AUTH PAGE -->
+<div id="auth-page" class="container">
+  <h1>EchoEar</h1>
+  <p class="subtitle">Voice Assistant Admin</p>
+  <div class="card">
+    <h3 id="auth-title">Login</h3>
+    <div id="auth-msg" class="msg"></div>
+    <label>Email</label>
+    <input id="auth-email" type="email" placeholder="you@example.com"/>
+    <label>Password</label>
+    <input id="auth-pass" type="password" placeholder="password"/>
+    <button class="btn btn-primary mt" style="width:100%" onclick="doAuth()">Login</button>
+    <p class="text-center mt text-sm">
+      <span id="auth-toggle-text">No account?</span>
+      <a id="auth-toggle" onclick="toggleAuth()">Register</a>
+    </p>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app-page" class="container hidden">
+  <h1>EchoEar</h1>
+  <p class="subtitle" id="user-email"></p>
+
+  <div class="tabs">
+    <div class="tab active" onclick="showTab('devices')">Devices</div>
+    <div class="tab" onclick="showTab('settings')">Settings</div>
+    <div class="tab" onclick="logout()">Logout</div>
+  </div>
+
+  <!-- DEVICES TAB -->
+  <div id="tab-devices">
+    <div class="card">
+      <h3>Add Device</h3>
+      <div class="row2">
+        <div><label>Device ID</label><input id="d-id" placeholder="echoear-001"/></div>
+        <div><label>Token</label><input id="d-token" placeholder="devtoken"/></div>
       </div>
-      <div>
-        <label>Token</label>
-        <input id="device_token" placeholder="devtoken" />
+      <label>Name (optional)</label>
+      <input id="d-name" placeholder="My EchoEar"/>
+      <button class="btn btn-primary mt" onclick="addDevice()">Add Device</button>
+    </div>
+    <div class="card">
+      <h3>My Devices</h3>
+      <div id="dev-msg" class="msg"></div>
+      <table>
+        <thead><tr><th>Device ID</th><th>Name</th><th>Last Seen</th><th></th></tr></thead>
+        <tbody id="dev-tbody"></tbody>
+      </table>
+      <p id="dev-empty" class="text-sm mt text-center hidden">No devices yet</p>
+    </div>
+  </div>
+
+  <!-- SETTINGS TAB -->
+  <div id="tab-settings" class="hidden">
+    <div class="card">
+      <h3>OpenAI Configuration</h3>
+      <div id="set-msg" class="msg"></div>
+      <label>API Key</label>
+      <input id="s-apikey" type="password" placeholder="sk-..."/>
+      <p class="text-sm" id="s-apikey-status"></p>
+      <label>Base URL</label>
+      <input id="s-baseurl" placeholder="https://api.openai.com/v1"/>
+      <div class="row2">
+        <div><label>Chat Model</label><input id="s-chat" placeholder="gpt-4o-mini"/></div>
+        <div><label>ASR Model</label><input id="s-asr" placeholder="whisper-1"/></div>
+      </div>
+      <div class="row2">
+        <div><label>TTS Model</label><input id="s-tts" placeholder="tts-1"/></div>
+        <div><label>TTS Voice</label><input id="s-voice" placeholder="alloy"/></div>
       </div>
     </div>
-    <button onclick="addDevice()">Add/Update</button>
+    <div class="card">
+      <h3>OpenClaw Configuration</h3>
+      <label>URL</label>
+      <input id="s-claw-url" placeholder="https://your-openclaw-instance/v1"/>
+      <label>Token</label>
+      <input id="s-claw-token" type="password" placeholder="token"/>
+      <p class="text-sm" id="s-claw-status"></p>
+      <label>Model</label>
+      <input id="s-claw-model" placeholder="claude"/>
+    </div>
+    <button class="btn btn-primary mt" style="width:100%" onclick="saveSettings()">Save Settings</button>
+  </div>
+</div>
 
-    <table id="device_table">
-      <thead><tr><th>Device ID</th><th>Token</th><th>Action</th></tr></thead>
-      <tbody></tbody>
-    </table>
+<script>
+let TOKEN = localStorage.getItem('echoear_token');
+let IS_REGISTER = false;
 
-    <h2>OpenAI Config</h2>
-    <label>Base URL</label>
-    <input id="openai_base_url" />
-    <label>Chat Model</label>
-    <input id="openai_chat_model" />
-    <label>TTS Model</label>
-    <input id="openai_tts_model" />
-    <label>TTS Voice</label>
-    <input id="openai_tts_voice" />
-    <button onclick="saveOpenai()">Save OpenAI Config</button>
+// ── Auth ──
+function toggleAuth() {
+  IS_REGISTER = !IS_REGISTER;
+  document.getElementById('auth-title').textContent = IS_REGISTER ? 'Register' : 'Login';
+  document.getElementById('auth-toggle-text').textContent = IS_REGISTER ? 'Have an account?' : 'No account?';
+  document.getElementById('auth-toggle').textContent = IS_REGISTER ? 'Login' : 'Register';
+}
 
-    <script>
-      async function loadDevices() {
-        const res = await fetch('/admin/devices');
-        const data = await res.json();
-        const tbody = document.querySelector('#device_table tbody');
-        tbody.innerHTML = '';
-        Object.entries(data.devices).forEach(([id, token]) => {
-          const tr = document.createElement('tr');
-          tr.innerHTML = `<td>${id}</td><td>${token}</td>
-            <td><button class="danger" onclick="delDevice('${id}')">Delete</button></td>`;
-          tbody.appendChild(tr);
-        });
-      }
+async function doAuth() {
+  const email = document.getElementById('auth-email').value.trim();
+  const pass = document.getElementById('auth-pass').value;
+  if (!email || !pass) return showMsg('auth-msg', 'Email and password required', true);
+  const endpoint = IS_REGISTER ? '/api/auth/register' : '/api/auth/login';
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({email, password: pass})
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Auth failed');
+    TOKEN = data.access_token;
+    localStorage.setItem('echoear_token', TOKEN);
+    localStorage.setItem('echoear_email', data.email);
+    enterApp();
+  } catch(e) { showMsg('auth-msg', e.message, true); }
+}
 
-      async function addDevice() {
-        const device_id = document.getElementById('device_id').value.trim();
-        const token = document.getElementById('device_token').value.trim();
-        if (!device_id || !token) return alert('device_id/token required');
-        await fetch('/admin/devices', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({device_id, token})
-        });
-        await loadDevices();
-      }
+function logout() {
+  TOKEN = null;
+  localStorage.removeItem('echoear_token');
+  localStorage.removeItem('echoear_email');
+  document.getElementById('auth-page').classList.remove('hidden');
+  document.getElementById('app-page').classList.add('hidden');
+}
 
-      async function delDevice(id) {
-        await fetch('/admin/devices/' + encodeURIComponent(id), {method: 'DELETE'});
-        await loadDevices();
-      }
+function enterApp() {
+  document.getElementById('auth-page').classList.add('hidden');
+  document.getElementById('app-page').classList.remove('hidden');
+  document.getElementById('user-email').textContent = localStorage.getItem('echoear_email') || '';
+  loadDevices();
+  loadSettings();
+}
 
-      async function loadOpenai() {
-        const res = await fetch('/admin/openai');
-        const data = await res.json();
-        document.getElementById('openai_base_url').value = data.openai_base_url || '';
-        document.getElementById('openai_chat_model').value = data.openai_chat_model || '';
-        document.getElementById('openai_tts_model').value = data.openai_tts_model || '';
-        document.getElementById('openai_tts_voice').value = data.openai_tts_voice || '';
-      }
+// ── API helper ──
+async function api(path, method='GET', body=null) {
+  const opts = { method, headers: {'Authorization': 'Bearer ' + TOKEN} };
+  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const res = await fetch(path, opts);
+  if (res.status === 401) { logout(); throw new Error('Session expired'); }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Request failed');
+  return data;
+}
 
-      async function saveOpenai() {
-        const openai_base_url = document.getElementById('openai_base_url').value.trim();
-        const openai_chat_model = document.getElementById('openai_chat_model').value.trim();
-        const openai_tts_model = document.getElementById('openai_tts_model').value.trim();
-        const openai_tts_voice = document.getElementById('openai_tts_voice').value.trim();
-        await fetch('/admin/openai', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({openai_base_url, openai_chat_model, openai_tts_model, openai_tts_voice})
-        });
-        alert('Saved');
-      }
+// ── Devices ──
+async function loadDevices() {
+  try {
+    const devices = await api('/api/devices');
+    const tbody = document.getElementById('dev-tbody');
+    const empty = document.getElementById('dev-empty');
+    tbody.innerHTML = '';
+    if (devices.length === 0) { empty.classList.remove('hidden'); return; }
+    empty.classList.add('hidden');
+    devices.forEach(d => {
+      const seen = d.last_seen ? new Date(d.last_seen).toLocaleString() : 'Never';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${d.device_id}</td><td>${d.name||'-'}</td><td>${seen}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="delDevice('${d.device_id}')">Remove</button></td>`;
+      tbody.appendChild(tr);
+    });
+  } catch(e) { showMsg('dev-msg', e.message, true); }
+}
 
-      loadDevices();
-      loadOpenai();
-    </script>
-  </body>
-</html>
-"""
+async function addDevice() {
+  const device_id = document.getElementById('d-id').value.trim();
+  const token = document.getElementById('d-token').value.trim();
+  const name = document.getElementById('d-name').value.trim();
+  if (!device_id || !token) return showMsg('dev-msg', 'Device ID and token required', true);
+  try {
+    await api('/api/devices', 'POST', {device_id, token, name});
+    document.getElementById('d-id').value = '';
+    document.getElementById('d-token').value = '';
+    document.getElementById('d-name').value = '';
+    showMsg('dev-msg', 'Device added', false);
+    await loadDevices();
+  } catch(e) { showMsg('dev-msg', e.message, true); }
+}
 
-@app.get("/admin/devices")
-async def admin_list_devices():
-    """List all registered devices"""
-    return {"devices": registry.list_devices()}
+async function delDevice(id) {
+  if (!confirm('Remove device ' + id + '?')) return;
+  try {
+    await api('/api/devices/' + encodeURIComponent(id), 'DELETE');
+    showMsg('dev-msg', 'Device removed', false);
+    await loadDevices();
+  } catch(e) { showMsg('dev-msg', e.message, true); }
+}
 
-@app.post("/admin/devices")
-async def admin_add_device(payload: dict):
-    """Add or update a device"""
-    device_id = payload.get("device_id")
-    token = payload.get("token")
-    if not device_id or not token:
-        raise HTTPException(status_code=400, detail="device_id and token required")
-    registry.register(device_id, token)
-    logger.info(f"Admin registered device: {device_id}")
-    return {"ok": True}
+// ── Settings ──
+async function loadSettings() {
+  try {
+    const s = await api('/api/settings');
+    document.getElementById('s-apikey').value = '';
+    document.getElementById('s-apikey-status').textContent = s.openai_api_key_set ? 'API key is set' : 'No API key configured (using server default)';
+    document.getElementById('s-baseurl').value = s.openai_base_url;
+    document.getElementById('s-chat').value = s.openai_chat_model;
+    document.getElementById('s-asr').value = s.openai_asr_model;
+    document.getElementById('s-tts').value = s.openai_tts_model;
+    document.getElementById('s-voice').value = s.openai_tts_voice;
+    document.getElementById('s-claw-url').value = s.openclaw_url;
+    document.getElementById('s-claw-token').value = '';
+    document.getElementById('s-claw-status').textContent = s.openclaw_token_set ? 'Token is set' : 'No token configured';
+    document.getElementById('s-claw-model').value = s.openclaw_model;
+  } catch(e) {}
+}
 
-@app.delete("/admin/devices/{device_id}")
-async def admin_delete_device(device_id: str):
-    """Delete a device"""
-    if not registry.delete(device_id):
-        raise HTTPException(status_code=404, detail="device_id not found")
-    logger.info(f"Admin deleted device: {device_id}")
-    return {"ok": True}
+async function saveSettings() {
+  const body = {};
+  const apikey = document.getElementById('s-apikey').value;
+  if (apikey) body.openai_api_key = apikey;
+  const baseurl = document.getElementById('s-baseurl').value.trim();
+  body.openai_base_url = baseurl;
+  body.openai_chat_model = document.getElementById('s-chat').value.trim();
+  body.openai_asr_model = document.getElementById('s-asr').value.trim();
+  body.openai_tts_model = document.getElementById('s-tts').value.trim();
+  body.openai_tts_voice = document.getElementById('s-voice').value.trim();
+  body.openclaw_url = document.getElementById('s-claw-url').value.trim();
+  const clawToken = document.getElementById('s-claw-token').value;
+  if (clawToken) body.openclaw_token = clawToken;
+  body.openclaw_model = document.getElementById('s-claw-model').value.trim();
+  try {
+    await api('/api/settings', 'PUT', body);
+    showMsg('set-msg', 'Settings saved', false);
+    await loadSettings();
+  } catch(e) { showMsg('set-msg', e.message, true); }
+}
 
-@app.get("/admin/openai")
-async def admin_get_openai():
-    """Get OpenAI configuration"""
-    return {
-        "openai_base_url": settings.openai_base_url,
-        "openai_chat_model": settings.openai_chat_model,
-        "openai_tts_model": settings.openai_tts_model,
-        "openai_tts_voice": settings.openai_tts_voice,
-    }
+// ── Tabs ──
+function showTab(name) {
+  document.querySelectorAll('[id^="tab-"]').forEach(el => el.classList.add('hidden'));
+  document.getElementById('tab-' + name).classList.remove('hidden');
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  event.target.classList.add('active');
+}
 
-@app.post("/admin/openai")
-async def admin_set_openai(payload: dict):
-    """Update OpenAI configuration"""
-    settings.openai_base_url = payload.get("openai_base_url", settings.openai_base_url)
-    settings.openai_chat_model = payload.get("openai_chat_model", settings.openai_chat_model)
-    settings.openai_tts_model = payload.get("openai_tts_model", settings.openai_tts_model)
-    settings.openai_tts_voice = payload.get("openai_tts_voice", settings.openai_tts_voice)
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(OPENAI_CFG_PATH, "w", encoding="utf-8") as f:
-        json.dump({
-            "openai_base_url": settings.openai_base_url,
-            "openai_chat_model": settings.openai_chat_model,
-            "openai_tts_model": settings.openai_tts_model,
-            "openai_tts_voice": settings.openai_tts_voice,
-        }, f, ensure_ascii=False, indent=2)
-    logger.info("Updated OpenAI config")
-    return {"ok": True}
+// ── Utils ──
+function showMsg(id, text, isErr) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = 'msg ' + (isErr ? 'msg-err' : 'msg-ok');
+  el.style.display = 'block';
+  setTimeout(() => el.style.display = 'none', 4000);
+}
+
+// ── Init ──
+if (TOKEN) { enterApp(); }
+</script>
+</body>
+</html>"""

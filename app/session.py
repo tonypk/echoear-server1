@@ -2,7 +2,32 @@
 import asyncio
 import time
 import uuid
+from dataclasses import dataclass, field
 from typing import Optional, List
+
+
+@dataclass
+class UserConfig:
+    """Per-user API configuration, loaded at WebSocket connect time.
+    Empty strings mean 'use global default from settings'.
+    """
+    user_id: int = 0
+
+    openai_api_key: str = ""
+    openai_base_url: str = ""
+    openai_chat_model: str = ""
+    openai_asr_model: str = ""
+    openai_tts_model: str = ""
+    openai_tts_voice: str = ""
+
+    openclaw_url: str = ""
+    openclaw_token: str = ""
+    openclaw_model: str = ""
+
+    def get(self, field_name: str, fallback: str) -> str:
+        """Return user value if set, otherwise fallback to global default."""
+        val = getattr(self, field_name, "")
+        return val if val else fallback
 
 
 class Session:
@@ -32,6 +57,9 @@ class Session:
         self._music_task: Optional[asyncio.Task] = None
         self._music_pause_event: asyncio.Event = asyncio.Event()
         self._music_pause_event.set()  # Start unpaused
+
+        # Per-user config (populated during WS auth)
+        self.config: UserConfig = UserConfig()
 
     def touch(self):
         """Update last activity timestamp."""
