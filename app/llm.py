@@ -1,9 +1,10 @@
 """Two-stage LLM orchestrator: OpenAI intent planning + OpenClaw execution"""
 import json
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 from openai import AsyncOpenAI
 from .config import settings
+from .session import Session
 from .openclaw import execute_task, is_configured as openclaw_configured
 
 logger = logging.getLogger(__name__)
@@ -49,12 +50,18 @@ def reset_conversation(session_id: str):
         logger.info(f"[{session_id}] Conversation history cleared")
 
 
-async def plan_intent(text: str, session_id: str) -> dict:
+async def plan_intent(text: str, session_id: str, session: Optional[Session] = None) -> dict:
     """Stage 1: Use OpenAI to analyze user intent and return structured action"""
-    client = AsyncOpenAI(
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
-    )
+    if session and session.config.openai_api_key:
+        client = AsyncOpenAI(
+            api_key=session.config.openai_api_key,
+            base_url=session.config.get("openai_base_url", settings.openai_base_url),
+        )
+    else:
+        client = AsyncOpenAI(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+        )
 
     if session_id not in _conversations:
         _conversations[session_id] = []
@@ -67,8 +74,11 @@ async def plan_intent(text: str, session_id: str) -> dict:
 
     messages = [{"role": "system", "content": INTENT_PROMPT}] + history
 
+    chat_model = (session.config.get("openai_chat_model", settings.intent_model)
+                  if session else settings.intent_model)
+
     response = await client.chat.completions.create(
-        model=settings.intent_model,
+        model=chat_model,
         messages=messages,
         response_format={"type": "json_object"},
     )
@@ -85,12 +95,18 @@ async def plan_intent(text: str, session_id: str) -> dict:
     return intent
 
 
-async def call_llm_chat(text: str, session_id: str) -> str:
+async def call_llm_chat(text: str, session_id: str, session: Optional[Session] = None) -> str:
     """Fallback: simple chat mode when OpenClaw is not configured"""
-    client = AsyncOpenAI(
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
-    )
+    if session and session.config.openai_api_key:
+        client = AsyncOpenAI(
+            api_key=session.config.openai_api_key,
+            base_url=session.config.get("openai_base_url", settings.openai_base_url),
+        )
+    else:
+        client = AsyncOpenAI(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+        )
 
     if session_id not in _conversations:
         _conversations[session_id] = []
@@ -103,8 +119,11 @@ async def call_llm_chat(text: str, session_id: str) -> str:
 
     messages = [{"role": "system", "content": CHAT_PROMPT}] + history
 
+    chat_model = (session.config.get("openai_chat_model", settings.intent_model)
+                  if session else settings.intent_model)
+
     response = await client.chat.completions.create(
-        model=settings.intent_model,
+        model=chat_model,
         messages=messages,
     )
 

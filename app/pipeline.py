@@ -143,7 +143,7 @@ async def _decode_and_asr(ws, session) -> Optional[str]:
     # --- ASR ---
     t0 = time.monotonic()
     try:
-        text = await transcribe_pcm(pcm)
+        text = await transcribe_pcm(pcm, session=session)
         logger.info(f"[{sid}] ASR: '{text}' ({time.monotonic()-t0:.2f}s)")
     except Exception as e:
         logger.error(f"[{sid}] ASR failed: {e}")
@@ -183,9 +183,9 @@ async def _process_and_speak(ws, session, text: str):
         return
 
     # --- Intent planning (fast, ~1s) ---
-    if openclaw_configured():
+    if openclaw_configured(session=session):
         t0 = time.monotonic()
-        intent = await plan_intent(text, session_id=sid)
+        intent = await plan_intent(text, session_id=sid, session=session)
         action = intent.get("action", "chat")
         logger.info(f"[{sid}] Intent: {action} ({time.monotonic()-t0:.2f}s)")
 
@@ -212,7 +212,7 @@ async def _process_and_speak(ws, session, text: str):
         # Simple chat mode (no OpenClaw)
         t0 = time.monotonic()
         try:
-            reply = await call_llm_chat(text, session_id=sid)
+            reply = await call_llm_chat(text, session_id=sid, session=session)
             logger.info(f"[{sid}] LLM chat: '{reply}' ({time.monotonic()-t0:.2f}s)")
         except Exception as e:
             logger.error(f"[{sid}] LLM failed: {e}", exc_info=True)
@@ -224,7 +224,7 @@ async def _process_and_speak(ws, session, text: str):
 
     # --- Normal TTS for chat responses ---
     try:
-        opus_packets = await synthesize_tts(reply)
+        opus_packets = await synthesize_tts(reply, session=session)
         logger.info(f"[{sid}] TTS synth: {len(opus_packets)} packets")
     except Exception as e:
         logger.error(f"[{sid}] TTS synth failed: {e}")
@@ -248,7 +248,7 @@ async def _play_music(ws, session, intent: dict):
 
     # --- Send hint via normal TTS round ---
     try:
-        hint_packets = await synthesize_tts(hint)
+        hint_packets = await synthesize_tts(hint, session=session)
         await _send_tts_round(ws, session, hint_packets, hint)
     except Exception as e:
         logger.warning(f"[{sid}] Music hint TTS failed: {e}")
@@ -262,7 +262,7 @@ async def _play_music(ws, session, intent: dict):
     except Exception as e:
         logger.error(f"[{sid}] Music fetch failed: {e}")
         try:
-            err_packets = await synthesize_tts("Sorry, I couldn't find that music.")
+            err_packets = await synthesize_tts("Sorry, I couldn't find that music.", session=session)
             await _send_tts_round(ws, session, err_packets, "error")
         except Exception:
             pass
@@ -348,7 +348,7 @@ async def _execute_with_hint(ws, session, intent: dict):
 
     # --- Synthesize hint audio ---
     try:
-        hint_packets = await synthesize_tts(hint)
+        hint_packets = await synthesize_tts(hint, session=session)
         logger.info(f"[{sid}] Hint TTS: '{hint}' ({len(hint_packets)} packets)")
     except Exception as e:
         logger.warning(f"[{sid}] Hint TTS failed: {e}")
@@ -370,7 +370,7 @@ async def _execute_with_hint(ws, session, intent: dict):
     # --- Execute OpenClaw with silence keepalive ---
     t0 = time.monotonic()
     logger.info(f"[{sid}] OpenClaw starting (sending silence keepalive every 2s)...")
-    openclaw_task = asyncio.create_task(execute_task(task))
+    openclaw_task = asyncio.create_task(execute_task(task, session=session))
 
     silence_blob = struct.pack('>H', len(_SILENCE_OPUS)) + _SILENCE_OPUS
 
@@ -398,7 +398,7 @@ async def _execute_with_hint(ws, session, intent: dict):
         result = "Sorry, I couldn't complete that task right now."
 
     # --- Synthesize result audio with silence keepalive (TTS API can take 3-5s) ---
-    tts_task = asyncio.create_task(synthesize_tts(result))
+    tts_task = asyncio.create_task(synthesize_tts(result, session=session))
 
     while not tts_task.done():
         if session.tts_abort or ws.closed:

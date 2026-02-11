@@ -1,9 +1,11 @@
 import asyncio
 import logging
 import struct
+from typing import Optional
 import opuslib
 from openai import AsyncOpenAI
 from .config import settings
+from .session import Session
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +13,16 @@ _client = AsyncOpenAI(
     api_key=settings.openai_api_key,
     base_url=settings.openai_base_url,
 )
+
+
+def _get_client(session: Optional[Session] = None) -> AsyncOpenAI:
+    """Return per-user client if session has custom API key, else global."""
+    if session and session.config.openai_api_key:
+        return AsyncOpenAI(
+            api_key=session.config.openai_api_key,
+            base_url=session.config.get("openai_base_url", settings.openai_base_url),
+        )
+    return _client
 
 
 def _resample_24k_to_16k(pcm_24k: bytes) -> bytes:
@@ -37,13 +49,19 @@ def _resample_24k_to_16k(pcm_24k: bytes) -> bytes:
     return struct.pack(f'<{len(samples_16k)}h', *samples_16k)
 
 
-async def synthesize_tts(text: str) -> list:
+async def synthesize_tts(text: str, session: Optional[Session] = None) -> list:
     """Synthesize TTS using OpenAI API and return list of Opus packets"""
-    logger.info(f"TTS: synthesizing '{text[:50]}...' with {settings.openai_tts_model}/{settings.openai_tts_voice}")
+    client = _get_client(session)
+    tts_model = (session.config.get("openai_tts_model", settings.openai_tts_model)
+                 if session else settings.openai_tts_model)
+    tts_voice = (session.config.get("openai_tts_voice", settings.openai_tts_voice)
+                 if session else settings.openai_tts_voice)
 
-    response = await _client.audio.speech.create(
-        model=settings.openai_tts_model,
-        voice=settings.openai_tts_voice,
+    logger.info(f"TTS: synthesizing '{text[:50]}...' with {tts_model}/{tts_voice}")
+
+    response = await client.audio.speech.create(
+        model=tts_model,
+        voice=tts_voice,
         input=text,
         response_format="pcm",  # Raw PCM16 24kHz mono
     )

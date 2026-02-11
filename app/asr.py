@@ -1,16 +1,28 @@
 import io
 import struct
 import logging
+from typing import Optional
 from openai import AsyncOpenAI
 from .config import settings
+from .session import Session
 
 logger = logging.getLogger(__name__)
 
-# API key and base_url are already sanitized in config.py
+# Global default client
 _client = AsyncOpenAI(
     api_key=settings.openai_api_key,
     base_url=settings.openai_base_url,
 )
+
+
+def _get_client(session: Optional[Session] = None) -> AsyncOpenAI:
+    """Return per-user client if session has custom API key, else global."""
+    if session and session.config.openai_api_key:
+        return AsyncOpenAI(
+            api_key=session.config.openai_api_key,
+            base_url=session.config.get("openai_base_url", settings.openai_base_url),
+        )
+    return _client
 
 def _pcm_to_wav(pcm_bytes: bytes) -> bytes:
     """Convert raw PCM16 mono 16kHz to WAV format in memory"""
@@ -51,18 +63,29 @@ _HALLUCINATIONS = {
 }
 
 
-async def transcribe_pcm(pcm_bytes: bytes) -> str:
+async def transcribe_pcm(pcm_bytes: bytes, session: Optional[Session] = None) -> str:
     """Transcribe PCM audio using OpenAI Whisper API"""
     wav_bytes = _pcm_to_wav(pcm_bytes)
-    logger.info(f"ASR: sending {len(pcm_bytes)} bytes PCM ({len(wav_bytes)} bytes WAV) to Whisper")
+    duration_s = len(pcm_bytes) / 2 / settings.pcm_sample_rate
+    logger.info(f"ASR: sending {len(pcm_bytes)} bytes PCM ({duration_s:.1f}s, {len(wav_bytes)} bytes WAV) to Whisper")
+
+    # Filter very short recordings (<0.5s) — usually noise/accidental triggers
+    if duration_s < 0.5:
+        logger.info(f"ASR: skipping short audio ({duration_s:.1f}s < 0.5s)")
+        return ""
 
     wav_file = io.BytesIO(wav_bytes)
     wav_file.name = "audio.wav"
 
-    transcript = await _client.audio.transcriptions.create(
-        model=settings.openai_asr_model,
+    client = _get_client(session)
+    asr_model = (session.config.get("openai_asr_model", settings.openai_asr_model)
+                 if session else settings.openai_asr_model)
+
+    transcript = await client.audio.transcriptions.create(
+        model=asr_model,
         file=wav_file,
-        # No language forced — Whisper auto-detects (Chinese + English + others)
+        temperature=0,
+        prompt="EchoEar voice assistant conversation.",
     )
 
     text = transcript.text.strip()
