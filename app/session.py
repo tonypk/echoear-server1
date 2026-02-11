@@ -24,6 +24,15 @@ class Session:
         self.first_activity_time = now
         self.last_activity_time = now
 
+        # Music state
+        self.music_playing: bool = False
+        self.music_paused: bool = False
+        self.music_abort: bool = False
+        self.music_title: str = ""
+        self._music_task: Optional[asyncio.Task] = None
+        self._music_pause_event: asyncio.Event = asyncio.Event()
+        self._music_pause_event.set()  # Start unpaused
+
     def touch(self):
         """Update last activity timestamp."""
         self.last_activity_time = time.monotonic()

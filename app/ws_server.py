@@ -86,8 +86,29 @@ async def handle_text_message(ws: WebSocketServerProtocol, session: Session, tex
     elif mtype == "abort":
         reason = payload.get("reason", "unknown")
         logger.info(f"[{session.session_id}] Abort requested (reason={reason})")
-        session.tts_abort = True
-        await ws_send_safe(ws, json.dumps({"type": "tts_end", "reason": "abort"}), session, "abort_ack")
+        if session.music_playing and reason == "wake_word_detected":
+            # Pause music (not stop) — user might want to resume after interaction
+            session._music_pause_event.clear()
+            session.music_paused = True
+            logger.info(f"[{session.session_id}] Music paused for voice interaction")
+        else:
+            session.tts_abort = True
+            await ws_send_safe(ws, json.dumps({"type": "tts_end", "reason": "abort"}), session, "abort_ack")
+
+    elif mtype == "music_ctrl":
+        action = payload.get("action")
+        if action == "pause":
+            session._music_pause_event.clear()
+            session.music_paused = True
+            logger.info(f"[{session.session_id}] Music paused by device")
+        elif action == "resume":
+            session._music_pause_event.set()
+            session.music_paused = False
+            logger.info(f"[{session.session_id}] Music resume requested by device")
+        elif action == "stop":
+            session.music_abort = True
+            session._music_pause_event.set()  # Unblock if paused
+            logger.info(f"[{session.session_id}] Music stopped by device")
 
     elif mtype == "ping":
         await ws_send_safe(ws, json.dumps({"type": "pong"}), session, "pong")
@@ -160,6 +181,8 @@ async def handle_client(ws: WebSocketServerProtocol, path: str):
         logger.error(f"[{session.session_id}] Error handling device {device_id}: {e}", exc_info=True)
     finally:
         session.tts_abort = True
+        session.music_abort = True
+        session._music_pause_event.set()  # Unblock music if paused
         if session._process_task and not session._process_task.done():
             logger.info(f"[{session.session_id}] Waiting for pipeline to finish...")
             try:

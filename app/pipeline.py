@@ -20,6 +20,7 @@ from .asr import transcribe_pcm
 from .tts import synthesize_tts
 from .llm import call_llm, plan_intent, call_llm_chat
 from .openclaw import execute_task, is_configured as openclaw_configured
+from .music import search_and_stream
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +192,20 @@ async def _process_and_speak(ws, session, text: str):
         if action == "execute":
             await _execute_with_hint(ws, session, intent)
             return
+        elif action == "music":
+            await _play_music(ws, session, intent)
+            return
+        elif action == "music_stop":
+            # Stop any active music
+            if session.music_playing:
+                session.music_abort = True
+                session._music_pause_event.set()  # Unblock if paused
+            reply = intent.get("response", "Music stopped.")
+        elif action == "music_pause":
+            if session.music_playing:
+                session._music_pause_event.clear()
+                session.music_paused = True
+            reply = intent.get("response", "Music paused.")
         else:
             reply = intent.get("response", "I'm not sure how to help with that.")
     else:
@@ -220,6 +235,101 @@ async def _process_and_speak(ws, session, text: str):
         return
 
     await _send_tts_round(ws, session, opus_packets, reply)
+
+
+async def _play_music(ws, session, intent: dict):
+    """Handle MUSIC intent: hint TTS → fetch audio → stream Opus batches.
+
+    Supports pause/resume via session._music_pause_event.
+    """
+    sid = session.session_id
+    query = intent.get("query", "")
+    hint = intent.get("reply_hint", "Playing music...")
+
+    # --- Send hint via normal TTS round ---
+    try:
+        hint_packets = await synthesize_tts(hint)
+        await _send_tts_round(ws, session, hint_packets, hint)
+    except Exception as e:
+        logger.warning(f"[{sid}] Music hint TTS failed: {e}")
+
+    if session.tts_abort or ws.closed:
+        return
+
+    # --- Fetch and stream music ---
+    try:
+        title, generator = await search_and_stream(query)
+    except Exception as e:
+        logger.error(f"[{sid}] Music fetch failed: {e}")
+        try:
+            err_packets = await synthesize_tts("Sorry, I couldn't find that music.")
+            await _send_tts_round(ws, session, err_packets, "error")
+        except Exception:
+            pass
+        return
+
+    session.music_playing = True
+    session.music_paused = False
+    session.music_abort = False
+    session.music_title = title
+    session._music_pause_event.set()
+    session._music_task = asyncio.current_task()
+
+    # Send music_start to device
+    await ws_send_safe(ws, json.dumps({
+        "type": "music_start", "title": title
+    }), session, "music_start")
+
+    logger.info(f"[{sid}] Music streaming: '{title}'")
+
+    try:
+        batch = []
+        sent = 0
+        async for opus_packet in generator:
+            if session.music_abort or ws.closed:
+                break
+
+            # Check pause
+            if not session._music_pause_event.is_set():
+                logger.info(f"[{sid}] Music paused at packet {sent}")
+                await session._music_pause_event.wait()
+                if session.music_abort or ws.closed:
+                    break
+                logger.info(f"[{sid}] Music resumed at packet {sent}")
+                # Tell device to re-enter MUSIC state
+                await ws_send_safe(ws, json.dumps({"type": "music_resume"}), session, "music_resume")
+
+            batch.append(opus_packet)
+            if len(batch) >= BATCH_SIZE:
+                blob = b''
+                for pkt in batch:
+                    blob += struct.pack('>H', len(pkt)) + pkt
+                ok = await ws_send_safe(ws, blob, session, "music_batch")
+                if not ok:
+                    break
+                sent += len(batch)
+                batch = []
+                await asyncio.sleep(BATCH_INTERVAL)
+
+        # Send remaining
+        if batch and not session.music_abort and not ws.closed:
+            blob = b''
+            for pkt in batch:
+                blob += struct.pack('>H', len(pkt)) + pkt
+            await ws_send_safe(ws, blob, session, "music_batch_final")
+            sent += len(batch)
+
+    except asyncio.CancelledError:
+        logger.info(f"[{sid}] Music task cancelled")
+    except Exception as e:
+        logger.error(f"[{sid}] Music streaming error: {e}")
+    finally:
+        session.music_playing = False
+        session.music_paused = False
+        session._music_task = None
+        if not ws.closed:
+            await ws_send_safe(ws, json.dumps({"type": "music_end"}), session, "music_end")
+        logger.info(f"[{sid}] Music ended: '{title}', {sent} packets sent")
 
 
 async def _execute_with_hint(ws, session, intent: dict):
