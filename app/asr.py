@@ -53,7 +53,7 @@ async def transcribe_pcm(pcm_bytes: bytes) -> str:
     transcript = await _client.audio.transcriptions.create(
         model=settings.openai_asr_model,
         file=wav_file,
-        # language not specified - Whisper auto-detects language
+        language="en",  # Force English to prevent misdetection (Japanese/Korean)
     )
 
     text = transcript.text.strip()
