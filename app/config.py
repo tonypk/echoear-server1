@@ -52,6 +52,7 @@ class Settings(BaseModel):
     # Audio parameters (PCM16)
     pcm_sample_rate: int = int(os.getenv("PCM_SAMPLE_RATE", "16000"))
     pcm_channels: int = int(os.getenv("PCM_CHANNELS", "1"))
+    frame_duration_ms: int = int(os.getenv("FRAME_DURATION_MS", "60"))
 
 settings = Settings()
 

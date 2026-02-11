@@ -1,358 +1,130 @@
-"""WebSocket server using websockets library (xiaozhi-compatible)"""
+"""WebSocket server — thin connection lifecycle + message routing.
+
+All pipeline logic (ASR/LLM/TTS/rate-control) lives in pipeline.py.
+Session state lives in session.py.
+"""
 import asyncio
 import json
 import logging
-import time
 import traceback
-import uuid
-from typing import Optional, List
+
 import websockets
 from websockets.server import WebSocketServerProtocol
-import opuslib
 
 from .config import settings
-from .protocol import AsrText, TtsStart, TtsEnd, ErrorMsg
+from .session import Session
+from .pipeline import run_pipeline, ws_send_safe
 from .registry import registry
-from .asr import transcribe_pcm
-from .tts import synthesize_tts
-from .llm import call_llm, reset_conversation
+from .llm import reset_conversation
 
 logger = logging.getLogger(__name__)
 
-# Send timeout for ws.send() — prevents hanging if client is slow to read
-# Reduced from 5s to 2s: phone hotspot TCP can stall; 3 consecutive timeouts
-# at 5s = 15s total, but device SPEAKING timeout is only 5s. At 2s, 3 timeouts = 6s.
-WS_SEND_TIMEOUT = 2.0  # seconds
 
-
-class ConnState:
-    def __init__(self, device_id: str):
-        self.device_id = device_id
-        self.session_id = str(uuid.uuid4())[:8]
-        self.opus_packets: List[bytes] = []
-        self.listening = False
-        self.tts_abort = False  # Abort flag for TTS streaming
-        self.processing = False  # Whether currently processing audio pipeline
-        self.listen_mode: Optional[str] = None  # "auto", "manual", etc.
-        self.protocol_version: int = 1  # 1=legacy (audio_start/end), 2=xiaozhi (listen)
-        self._process_task: Optional[asyncio.Task] = None  # Background process_audio task
-
-
-async def _ws_send_safe(ws: WebSocketServerProtocol, data, state: ConnState, label: str = ""):
-    """Send data via WebSocket with timeout. Returns True on success."""
-    try:
-        await asyncio.wait_for(ws.send(data), timeout=WS_SEND_TIMEOUT)
-        return True
-    except asyncio.TimeoutError:
-        logger.error(f"[{state.session_id}] ws.send() timed out ({WS_SEND_TIMEOUT}s) {label}")
-        return False
-    except websockets.exceptions.ConnectionClosed as e:
-        logger.warning(f"[{state.session_id}] WS closed during send {label}: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"[{state.session_id}] ws.send() failed {label}: {type(e).__name__}: {e}")
-        return False
-
-
-async def handle_text_message(ws: WebSocketServerProtocol, state: ConnState, text: str):
-    """Handle text JSON messages from device"""
+async def handle_text_message(ws: WebSocketServerProtocol, session: Session, text: str):
+    """Route incoming JSON messages."""
     try:
         payload = json.loads(text)
     except Exception:
-        await _ws_send_safe(ws, json.dumps({"type": "error", "message": "invalid json"}), state)
+        await ws_send_safe(ws, json.dumps({"type": "error", "message": "invalid json"}), session)
         return
 
     mtype = payload.get("type")
-    logger.info(f"[{state.session_id}] Device {state.device_id}: {mtype}")
+    session.touch()
+    logger.info(f"[{session.session_id}] Device {session.device_id}: {mtype}")
 
     if mtype == "hello":
-        # Extract listen_mode if provided (xiaozhi-style protocol)
         listen_mode = payload.get("listen_mode")
         if listen_mode:
-            state.listen_mode = listen_mode
-            state.protocol_version = 2
-            logger.info(f"[{state.session_id}] Xiaozhi protocol v2, listen_mode={listen_mode}")
+            session.listen_mode = listen_mode
+            session.protocol_version = 2
+            logger.info(f"[{session.session_id}] Xiaozhi protocol v2, listen_mode={listen_mode}")
 
-        # Respond with session info and audio parameters
         hello_resp = {
             "type": "hello",
-            "session_id": state.session_id,
+            "session_id": session.session_id,
             "audio_params": {
                 "sample_rate": settings.pcm_sample_rate,
                 "channels": settings.pcm_channels,
                 "codec": "opus",
-                "frame_duration_ms": 60,
+                "frame_duration_ms": settings.frame_duration_ms,
             },
-            "features": {
-                "asr": True,
-                "tts": True,
-                "llm": True,
-                "abort": True,
-            },
-            "version": state.protocol_version,
+            "features": {"asr": True, "tts": True, "llm": True, "abort": True},
+            "version": session.protocol_version,
         }
-        await _ws_send_safe(ws, json.dumps(hello_resp), state, "hello_resp")
-        logger.info(f"[{state.session_id}] Hello handshake complete")
-        return
+        await ws_send_safe(ws, json.dumps(hello_resp), session, "hello_resp")
+        logger.info(f"[{session.session_id}] Hello handshake complete")
 
     elif mtype == "audio_start":
-        state.opus_packets = []
-        state.listening = True
-        state.tts_abort = False  # Reset abort flag for new interaction
-        return
+        session.opus_packets = []
+        session.listening = True
+        session.tts_abort = False
 
     elif mtype == "audio_end":
-        state.listening = False
-        _launch_process_audio(ws, state)
-        return
+        session.listening = False
+        _launch_pipeline(ws, session)
 
     elif mtype == "listen":
-        # Xiaozhi-style listen protocol
         listen_state = payload.get("state")
         listen_mode = payload.get("mode")
-        listen_text = payload.get("text")
 
         if listen_state == "detect":
-            # Wake word detection notification
-            logger.info(f"[{state.session_id}] Wake detected: text={listen_text}")
-            return
+            logger.info(f"[{session.session_id}] Wake detected: text={payload.get('text')}")
 
         elif listen_state == "start":
-            # Start listening (equivalent to audio_start)
             if listen_mode:
-                state.listen_mode = listen_mode
-            state.opus_packets = []
-            state.listening = True
-            state.tts_abort = False
-            logger.info(f"[{state.session_id}] Listen start (mode={listen_mode})")
-            return
+                session.listen_mode = listen_mode
+            session.opus_packets = []
+            session.listening = True
+            session.tts_abort = False
+            logger.info(f"[{session.session_id}] Listen start (mode={listen_mode})")
 
         elif listen_state == "stop":
-            # Stop listening (equivalent to audio_end)
-            state.listening = False
-            logger.info(f"[{state.session_id}] Listen stop, launching process_audio...")
-            _launch_process_audio(ws, state)
-            return
+            session.listening = False
+            logger.info(f"[{session.session_id}] Listen stop, launching pipeline...")
+            _launch_pipeline(ws, session)
 
     elif mtype == "abort":
-        # Client requests TTS abort (user started speaking during playback)
         reason = payload.get("reason", "unknown")
-        logger.info(f"[{state.session_id}] Abort requested by device (reason={reason})")
-        state.tts_abort = True
-        # Acknowledge abort
-        await _ws_send_safe(ws, json.dumps({"type": "tts_end", "reason": "abort"}), state, "abort_ack")
-        return
+        logger.info(f"[{session.session_id}] Abort requested (reason={reason})")
+        session.tts_abort = True
+        await ws_send_safe(ws, json.dumps({"type": "tts_end", "reason": "abort"}), session, "abort_ack")
 
     elif mtype == "ping":
-        await _ws_send_safe(ws, json.dumps({"type": "pong"}), state, "pong")
+        await ws_send_safe(ws, json.dumps({"type": "pong"}), session, "pong")
+
+
+def _launch_pipeline(ws: WebSocketServerProtocol, session: Session):
+    """Launch the ASR→LLM→TTS pipeline as a background task."""
+    if session.processing:
+        logger.warning(f"[{session.session_id}] Already processing, ignoring new request")
         return
 
+    if session._process_task and not session._process_task.done():
+        logger.warning(f"[{session.session_id}] Cancelling previous pipeline task")
+        session._process_task.cancel()
 
-def _launch_process_audio(ws: WebSocketServerProtocol, state: ConnState):
-    """Launch process_audio as a background task so the message loop stays responsive."""
-    if state.processing:
-        logger.warning(f"[{state.session_id}] Already processing audio, ignoring new request")
-        return
-
-    # Cancel any previous task that might still be lingering
-    if state._process_task and not state._process_task.done():
-        logger.warning(f"[{state.session_id}] Cancelling previous process_audio task")
-        state._process_task.cancel()
-
-    state._process_task = asyncio.create_task(
-        _process_audio_wrapper(ws, state)
-    )
+    session._process_task = asyncio.create_task(_pipeline_wrapper(ws, session))
 
 
-async def _process_audio_wrapper(ws: WebSocketServerProtocol, state: ConnState):
-    """Wrapper to catch and log any unhandled exceptions from process_audio."""
+async def _pipeline_wrapper(ws: WebSocketServerProtocol, session: Session):
+    """Wrapper to catch unhandled exceptions from the pipeline."""
     try:
-        await process_audio(ws, state)
+        await run_pipeline(ws, session)
     except asyncio.CancelledError:
-        logger.info(f"[{state.session_id}] process_audio cancelled")
-        state.processing = False
+        logger.info(f"[{session.session_id}] Pipeline cancelled")
+        session.processing = False
     except Exception as e:
-        logger.error(f"[{state.session_id}] UNHANDLED in process_audio: {type(e).__name__}: {e}")
+        logger.error(f"[{session.session_id}] UNHANDLED in pipeline: {type(e).__name__}: {e}")
         logger.error(traceback.format_exc())
-        state.processing = False
+        session.processing = False
         try:
-            await _ws_send_safe(ws, json.dumps({"type": "error", "message": f"Internal error: {e}"}), state)
+            await ws_send_safe(ws, json.dumps({"type": "error", "message": f"Internal error: {e}"}), session)
         except Exception:
             pass
 
 
-async def handle_binary_message(ws: WebSocketServerProtocol, state: ConnState, chunk: bytes):
-    """Accumulate Opus audio packets"""
-    if not state.listening:
-        return
-    state.opus_packets.append(bytes(chunk))
-
-
-async def process_audio(ws: WebSocketServerProtocol, state: ConnState):
-    """Process accumulated audio: Opus decode -> ASR -> LLM -> TTS
-
-    Runs as a background task (via _launch_process_audio) so the message
-    loop stays responsive and can process abort messages during TTS streaming.
-    """
-    if not state.opus_packets:
-        await _ws_send_safe(ws, json.dumps({"type": "error", "message": "empty audio"}), state)
-        return
-
-    state.processing = True
-    pipeline_t0 = time.monotonic()
-
-    try:
-        await _process_audio_inner(ws, state, pipeline_t0)
-    finally:
-        state.processing = False
-        elapsed = time.monotonic() - pipeline_t0
-        logger.info(f"[{state.session_id}] Pipeline total: {elapsed:.1f}s")
-
-
-async def _process_audio_inner(ws, state, pipeline_t0):
-    """Inner pipeline logic, separated for clean finally handling."""
-
-    logger.info(f"[{state.session_id}] Pipeline start: {len(state.opus_packets)} opus packets, "
-                f"abort={state.tts_abort}, closed={ws.closed}, listening={state.listening}")
-
-    # Decode Opus packets to raw PCM
-    t0 = time.monotonic()
-    try:
-        decoder = opuslib.Decoder(settings.pcm_sample_rate, settings.pcm_channels)
-        pcm_frames = []
-        for packet in state.opus_packets:
-            pcm_frame = decoder.decode(packet, 960)  # 960 samples = 60ms @ 16kHz
-            pcm_frames.append(pcm_frame)
-        pcm = b''.join(pcm_frames)
-        logger.info(f"[{state.session_id}] Opus decode: {len(state.opus_packets)} packets -> {len(pcm)} bytes PCM ({time.monotonic()-t0:.2f}s)")
-    except Exception as e:
-        logger.error(f"[{state.session_id}] Opus decode failed: {e}")
-        await _ws_send_safe(ws, json.dumps({"type": "error", "message": f"Opus decode failed: {e}"}), state)
-        return
-
-    if state.tts_abort or ws.closed:
-        logger.info(f"[{state.session_id}] Aborted before ASR (abort={state.tts_abort}, closed={ws.closed})")
-        return
-
-    # ASR
-    t0 = time.monotonic()
-    try:
-        text = await transcribe_pcm(pcm)
-        logger.info(f"[{state.session_id}] ASR: '{text}' ({time.monotonic()-t0:.2f}s)")
-    except Exception as e:
-        logger.error(f"[{state.session_id}] ASR failed: {e}")
-        await _ws_send_safe(ws, json.dumps({"type": "error", "message": f"ASR failed: {e}"}), state)
-        return
-
-    await _ws_send_safe(ws, json.dumps({"type": "asr_text", "text": text}), state, "asr_text")
-
-    if not text or text.strip() == "":
-        logger.info(f"[{state.session_id}] ASR empty, skipping LLM+TTS")
-        return
-
-    if state.tts_abort or ws.closed:
-        logger.info(f"[{state.session_id}] Aborted before LLM (abort={state.tts_abort}, closed={ws.closed})")
-        return
-
-    # LLM
-    t0 = time.monotonic()
-    try:
-        reply = await call_llm(text, session_id=state.session_id)
-        logger.info(f"[{state.session_id}] LLM: '{reply}' ({time.monotonic()-t0:.2f}s)")
-    except Exception as e:
-        logger.error(f"[{state.session_id}] LLM failed: {e}", exc_info=True)
-        await _ws_send_safe(ws, json.dumps({"type": "error", "message": f"LLM failed: {e}"}), state)
-        return
-
-    if state.tts_abort or ws.closed:
-        logger.info(f"[{state.session_id}] Aborted before TTS (abort={state.tts_abort}, closed={ws.closed})")
-        return
-
-    # TTS synthesis
-    t0 = time.monotonic()
-    try:
-        opus_packets = await synthesize_tts(reply)
-        logger.info(f"[{state.session_id}] TTS synth: {len(opus_packets)} packets ({time.monotonic()-t0:.2f}s)")
-    except Exception as e:
-        logger.error(f"[{state.session_id}] TTS synth failed: {e}")
-        await _ws_send_safe(ws, json.dumps({"type": "error", "message": f"TTS failed: {e}"}), state)
-        return
-
-    if state.tts_abort or ws.closed:
-        logger.info(f"[{state.session_id}] Aborted before TTS stream (abort={state.tts_abort}, closed={ws.closed})")
-        return
-
-    # --- TTS streaming ---
-    ok = await _ws_send_safe(ws, json.dumps({"type": "tts_start", "text": reply}), state, "tts_start")
-    if not ok:
-        logger.error(f"[{state.session_id}] Failed to send tts_start, aborting TTS")
-        return
-
-    logger.info(f"[{state.session_id}] TTS stream start: {len(opus_packets)} packets, "
-                f"abort={state.tts_abort}, closed={ws.closed}, processing={state.processing}")
-
-    # Steady-rate pacing: NO burst. Phone hotspot NATs can drop connections
-    # when they see a sudden burst of small packets at 10ms intervals.
-    # Instead, send all packets at a consistent 20ms interval.
-    # Device has 24-slot playback queue (1.44s buffer) so 20ms is fast enough
-    # to keep the queue fed while being gentle on the network.
-    SEND_INTERVAL = 0.020  # 20ms between all packets (vs 60ms real-time = 40ms margin)
-
-    sent_count = 0
-    send_errors = 0
-    t0 = time.monotonic()
-
-    for i, packet in enumerate(opus_packets):
-        if state.tts_abort:
-            logger.info(f"[{state.session_id}] TTS aborted at {sent_count}/{len(opus_packets)}")
-            break
-
-        if ws.closed:
-            logger.warning(f"[{state.session_id}] WS closed at TTS packet {sent_count}/{len(opus_packets)}")
-            break
-
-        send_t0 = time.monotonic()
-        ok = await _ws_send_safe(ws, packet, state, f"pkt#{i}")
-        send_dt = time.monotonic() - send_t0
-
-        if ok:
-            sent_count += 1
-            send_errors = 0
-            if send_dt > 0.1:
-                logger.warning(f"[{state.session_id}] Slow send pkt#{i}: {send_dt:.3f}s ({len(packet)}B)")
-        else:
-            send_errors += 1
-            logger.error(f"[{state.session_id}] Send FAILED pkt#{i} after {send_dt:.3f}s "
-                        f"(consecutive_errors={send_errors}, abort={state.tts_abort}, closed={ws.closed})")
-            if send_errors >= 3:
-                logger.error(f"[{state.session_id}] 3 consecutive send errors at packet {i}, aborting TTS")
-                break
-            await asyncio.sleep(0.01)
-            continue
-
-        # Log progress
-        if sent_count <= 5 or sent_count % 20 == 0:
-            logger.info(f"[{state.session_id}] TTS sent #{sent_count}/{len(opus_packets)} "
-                       f"({len(packet)}B, send={send_dt*1000:.1f}ms)")
-
-        # Steady-rate pacing: absolute time targets prevent drift
-        target = t0 + (i + 1) * SEND_INTERVAL
-        sleep_time = target - time.monotonic()
-        if sleep_time > 0:
-            await asyncio.sleep(sleep_time)
-
-    elapsed = time.monotonic() - t0
-    if not state.tts_abort:
-        ok = await _ws_send_safe(ws, json.dumps({"type": "tts_end"}), state, "tts_end")
-        logger.info(f"[{state.session_id}] TTS complete: {sent_count}/{len(opus_packets)} in {elapsed:.1f}s "
-                     f"(errors={send_errors}, tts_end={'sent' if ok else 'FAILED'})")
-    else:
-        logger.info(f"[{state.session_id}] TTS aborted after {sent_count}/{len(opus_packets)} in {elapsed:.1f}s")
-
-
 async def handle_client(ws: WebSocketServerProtocol, path: str):
-    """Main WebSocket connection handler"""
-    # Extract device_id and token from headers
+    """Main WebSocket connection handler — auth, message loop, cleanup."""
     device_id = ws.request_headers.get("x-device-id")
     token = ws.request_headers.get("x-device-token")
 
@@ -360,63 +132,57 @@ async def handle_client(ws: WebSocketServerProtocol, path: str):
 
     if not device_id or not token:
         logger.warning(f"Missing credentials from {ws.remote_address}")
-        await _ws_send_safe(ws, json.dumps({"type": "error", "message": "missing device_id/token"}),
-                            ConnState("unknown"))
+        await ws_send_safe(ws, json.dumps({"type": "error", "message": "missing device_id/token"}), Session("unknown"))
         await ws.close(code=4401, reason="missing credentials")
         return
 
     if not registry.is_valid(device_id, token):
         logger.warning(f"Invalid token for device {device_id}")
-        await _ws_send_safe(ws, json.dumps({"type": "error", "message": "invalid token"}),
-                            ConnState("unknown"))
+        await ws_send_safe(ws, json.dumps({"type": "error", "message": "invalid token"}), Session("unknown"))
         await ws.close(code=4401, reason="invalid token")
         return
 
-    state = ConnState(device_id)
-    logger.info(f"[{state.session_id}] Device {device_id} authenticated, session started")
+    session = Session(device_id)
+    logger.info(f"[{session.session_id}] Device {device_id} authenticated, session started")
 
     try:
         async for message in ws:
             if isinstance(message, str):
-                await handle_text_message(ws, state, message)
+                await handle_text_message(ws, session, message)
             elif isinstance(message, bytes):
-                await handle_binary_message(ws, state, message)
+                # Accumulate Opus audio packets
+                if session.listening:
+                    session.opus_packets.append(bytes(message))
+                    session.touch()
     except websockets.exceptions.ConnectionClosed:
-        logger.info(f"[{state.session_id}] Device {device_id} disconnected")
+        logger.info(f"[{session.session_id}] Device {device_id} disconnected")
     except Exception as e:
-        logger.error(f"[{state.session_id}] Error handling device {device_id}: {e}", exc_info=True)
+        logger.error(f"[{session.session_id}] Error handling device {device_id}: {e}", exc_info=True)
     finally:
-        # Signal abort to any running process_audio task
-        state.tts_abort = True
-        # Wait briefly for background task to finish
-        if state._process_task and not state._process_task.done():
-            logger.info(f"[{state.session_id}] Waiting for process_audio to finish...")
+        session.tts_abort = True
+        if session._process_task and not session._process_task.done():
+            logger.info(f"[{session.session_id}] Waiting for pipeline to finish...")
             try:
-                await asyncio.wait_for(state._process_task, timeout=2.0)
+                await asyncio.wait_for(session._process_task, timeout=2.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
-                state._process_task.cancel()
-                logger.warning(f"[{state.session_id}] Force-cancelled process_audio")
-        reset_conversation(state.session_id)
-        logger.info(f"[{state.session_id}] Session ended for device {device_id}")
+                session._process_task.cancel()
+                logger.warning(f"[{session.session_id}] Force-cancelled pipeline")
+        reset_conversation(session.session_id)
+        logger.info(f"[{session.session_id}] Session ended for device {device_id}")
 
 
 async def start_websocket_server():
-    """Start the WebSocket server on configured port"""
+    """Start the WebSocket server."""
     logger.info(f"Starting WebSocket server on {settings.ws_host}:{settings.ws_port}")
 
     async with websockets.serve(
         handle_client,
         settings.ws_host,
         settings.ws_port,
-        # Disable server-side pings: device uses TCP keepalive instead
         ping_interval=None,
         ping_timeout=None,
-        # Small write buffer to detect TCP congestion quickly.
-        # With 256KB (old), ws.send() never blocks for ~21KB of TTS data,
-        # hiding the fact that TCP stalled after 5 packets through phone hotspot.
-        # With 4KB, after ~22 buffered packets ws.send() blocks → 2s timeout fires.
-        write_limit=4096,   # 4KB — enables TCP backpressure detection
-        max_queue=64,       # Allow more incoming messages to buffer
+        write_limit=4096,
+        max_queue=64,
     ):
         logger.info(f"WebSocket server listening on ws://{settings.ws_host}:{settings.ws_port}/ws")
-        await asyncio.Future()  # Run forever
+        await asyncio.Future()
