@@ -350,7 +350,7 @@ async def _play_music(ws, session, intent: dict):
                     break
                 sent += len(batch)
                 batch = []
-                await asyncio.sleep(BATCH_INTERVAL)
+                await asyncio.sleep(MUSIC_BATCH_INTERVAL)
 
         # Send remaining
         if batch and not session.music_abort and not ws.closed:
@@ -475,7 +475,8 @@ async def _execute_with_hint(ws, session, intent: dict):
 
 
 BATCH_SIZE = 10       # 10 opus packets per WS message (~2KB, fits in one TCP segment)
-BATCH_INTERVAL = 0.5  # 500ms between batches (10×60ms=600ms audio per batch = 1.2× real-time)
+BATCH_INTERVAL = 0.5  # 500ms between batches for TTS (10×60ms=600ms audio = 1.2× real-time for responsiveness)
+MUSIC_BATCH_INTERVAL = 0.55  # 550ms between batches for music (10×60ms=600ms audio = ~1.1× real-time, prevents device buffer overflow)
 
 
 async def _stream_batched(
