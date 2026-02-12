@@ -1,15 +1,18 @@
-"""REST API routes: auth, devices, user settings."""
+"""REST API routes: auth, devices, user settings, meetings."""
+import os
 import logging
 from datetime import datetime
 from typing import Optional, List
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import get_db
-from .models import User, Device, UserSettings, Reminder
+from .models import User, Device, UserSettings, Reminder, Meeting
 from .auth import (
     hash_password, verify_password, create_access_token,
     get_current_user, hash_token, encrypt_secret, decrypt_secret,
@@ -280,5 +283,95 @@ async def delete_reminder(
     if not reminder:
         raise HTTPException(status_code=404, detail="Reminder not found")
     await db.delete(reminder)
+    await db.commit()
+    return {"ok": True}
+
+
+# ── Meetings ─────────────────────────────────────────────────
+
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+class MeetingOut(BaseModel):
+    id: int
+    session_id: str
+    title: str
+    duration_s: int
+    status: str
+    transcript: str
+    started_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/meetings", response_model=List[MeetingOut])
+async def list_meetings(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Meeting)
+        .where(Meeting.user_id == user.id)
+        .order_by(Meeting.started_at.desc())
+    )
+    return result.scalars().all()
+
+
+@router.get("/meetings/{meeting_id}/download")
+async def download_meeting(
+    meeting_id: int,
+    token: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Download meeting audio. Accepts token via query param (for browser downloads)."""
+    from .auth import decode_access_token
+    if not token:
+        raise HTTPException(status_code=401, detail="Token required")
+    try:
+        payload = decode_access_token(token)
+        user_id = int(payload["sub"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    result = await db.execute(
+        select(Meeting).where(Meeting.id == meeting_id, Meeting.user_id == user_id)
+    )
+    meeting = result.scalar_one_or_none()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    if not meeting.audio_path:
+        raise HTTPException(status_code=404, detail="No audio file available")
+
+    filepath = DATA_DIR / meeting.audio_path
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="Audio file not found on disk")
+
+    filename = f"{meeting.title}_{meeting.session_id}.wav"
+    return FileResponse(filepath, media_type="audio/wav", filename=filename)
+
+
+@router.delete("/meetings/{meeting_id}")
+async def delete_meeting(
+    meeting_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Meeting).where(Meeting.id == meeting_id, Meeting.user_id == user.id)
+    )
+    meeting = result.scalar_one_or_none()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    # Delete audio file
+    if meeting.audio_path:
+        filepath = DATA_DIR / meeting.audio_path
+        if filepath.exists():
+            filepath.unlink()
+            logger.info(f"Deleted meeting audio: {filepath}")
+
+    await db.delete(meeting)
     await db.commit()
     return {"ok": True}

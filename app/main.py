@@ -2,9 +2,12 @@
 HiTony Server - FastAPI HTTP endpoints + admin dashboard.
 WebSocket server runs separately via ws_server.py (launched by run_server.py).
 """
+import asyncio
 import json
 import os
 import logging
+from datetime import datetime, timedelta
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -32,6 +35,9 @@ async def on_startup():
     from .database import init_db
     await init_db()
 
+    # Start meeting cleanup background task
+    asyncio.create_task(_meeting_cleanup_loop())
+
     # Load legacy openai.json config (backward compat)
     if os.path.exists(OPENAI_CFG_PATH):
         try:
@@ -44,6 +50,40 @@ async def on_startup():
             logger.info("Loaded legacy OpenAI config from disk")
         except Exception as e:
             logger.warning(f"Failed to load OpenAI config: {e}")
+
+
+async def _meeting_cleanup_loop():
+    """Periodically delete meeting recordings older than retention period."""
+    while True:
+        await asyncio.sleep(3600)  # Run every hour
+        try:
+            retention_days = settings.meeting_retention_days
+            if retention_days <= 0:
+                continue
+            cutoff = datetime.utcnow() - timedelta(days=retention_days)
+
+            from .database import async_session_factory
+            from .models import Meeting
+            from sqlalchemy import select
+
+            data_dir = Path(DATA_DIR)
+            async with async_session_factory() as db:
+                result = await db.execute(
+                    select(Meeting).where(Meeting.created_at < cutoff)
+                )
+                old_meetings = result.scalars().all()
+                for m in old_meetings:
+                    if m.audio_path:
+                        fp = data_dir / m.audio_path
+                        if fp.exists():
+                            fp.unlink()
+                            logger.info(f"Cleanup: deleted audio {fp}")
+                    await db.delete(m)
+                if old_meetings:
+                    await db.commit()
+                    logger.info(f"Cleanup: removed {len(old_meetings)} meetings older than {retention_days} days")
+        except Exception as e:
+            logger.error(f"Meeting cleanup error: {e}")
 
 
 # ── Legacy endpoints (backward compat) ───────────────────────
@@ -164,6 +204,7 @@ _ADMIN_HTML = """<!doctype html>
 
   <div class="tabs">
     <div class="tab active" onclick="showTab('devices')">Devices</div>
+    <div class="tab" onclick="showTab('meetings')">Meetings</div>
     <div class="tab" onclick="showTab('reminders')">Reminders</div>
     <div class="tab" onclick="showTab('settings')">Settings</div>
     <div class="tab" onclick="logout()">Logout</div>
@@ -189,6 +230,19 @@ _ADMIN_HTML = """<!doctype html>
         <tbody id="dev-tbody"></tbody>
       </table>
       <p id="dev-empty" class="text-sm mt text-center hidden">No devices yet</p>
+    </div>
+  </div>
+
+  <!-- MEETINGS TAB -->
+  <div id="tab-meetings" class="hidden">
+    <div class="card">
+      <h3>Meeting Recordings</h3>
+      <div id="mtg-msg" class="msg"></div>
+      <table>
+        <thead><tr><th>Title</th><th>Duration</th><th>Status</th><th>Date</th><th></th></tr></thead>
+        <tbody id="mtg-tbody"></tbody>
+      </table>
+      <p id="mtg-empty" class="text-sm mt text-center hidden">No meeting recordings yet. Say "start meeting" to your HiTony device!</p>
     </div>
   </div>
 
@@ -406,6 +460,43 @@ async function delReminder(id) {
   } catch(e) { showMsg('rem-msg', e.message, true); }
 }
 
+// ── Meetings ──
+async function loadMeetings() {
+  try {
+    const meetings = await api('/api/meetings');
+    const tbody = document.getElementById('mtg-tbody');
+    const empty = document.getElementById('mtg-empty');
+    tbody.innerHTML = '';
+    if (meetings.length === 0) { empty.classList.remove('hidden'); return; }
+    empty.classList.add('hidden');
+    meetings.forEach(m => {
+      const dt = m.started_at ? new Date(m.started_at).toLocaleString() : '-';
+      const dur = m.duration_s > 0 ? Math.floor(m.duration_s/60) + ':' + String(m.duration_s%60).padStart(2,'0') : '-';
+      const statusMap = {recording:'Recording',ended:'Ended',transcribed:'Transcribed'};
+      const statusText = statusMap[m.status] || m.status;
+      const statusCls = m.status==='recording'?'color:#d97706':m.status==='transcribed'?'color:#16a34a':'color:#555';
+      const dlBtn = m.status !== 'recording' ? `<button class="btn btn-sm" style="background:#2563eb;color:#fff;margin-right:4px" onclick="downloadMeeting(${m.id})">Download</button>` : '';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${m.title}</td><td>${dur}</td><td style="${statusCls}">${statusText}</td><td>${dt}</td>
+        <td>${dlBtn}<button class="btn btn-danger btn-sm" onclick="delMeeting(${m.id})">Delete</button></td>`;
+      tbody.appendChild(tr);
+    });
+  } catch(e) { showMsg('mtg-msg', e.message, true); }
+}
+
+function downloadMeeting(id) {
+  window.open('/api/meetings/' + id + '/download?token=' + encodeURIComponent(TOKEN), '_blank');
+}
+
+async function delMeeting(id) {
+  if (!confirm('Delete this meeting recording?')) return;
+  try {
+    await api('/api/meetings/' + id, 'DELETE');
+    showMsg('mtg-msg', 'Meeting deleted', false);
+    await loadMeetings();
+  } catch(e) { showMsg('mtg-msg', e.message, true); }
+}
+
 // ── LLM Provider Presets ──
 const PROVIDERS = {
   openai:     { url: 'https://api.openai.com/v1',          chat: 'gpt-4o-mini',              asr: 'whisper-1' },
@@ -497,6 +588,7 @@ function showTab(name) {
   document.getElementById('tab-' + name).classList.remove('hidden');
   document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
   event.target.classList.add('active');
+  if (name === 'meetings') loadMeetings();
   if (name === 'reminders') loadReminders();
 }
 

@@ -12,20 +12,28 @@ logger = logging.getLogger(__name__)
 MEETINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "meetings")
 
 
-def _save_meeting_audio(session_id: str, audio_buffer: bytearray) -> str:
-    """Save PCM audio buffer as WAV file. Returns relative path."""
+def _save_meeting_audio(session_id: str, audio_buffer: bytearray, user_id: int = 0) -> str:
+    """Save PCM audio buffer as WAV file. Returns relative path.
+
+    Files are organized by user: data/meetings/user_{id}/{session_id}.wav
+    Unbound devices go to data/meetings/unbound/
+    """
     from ...asr import pcm_to_wav
 
-    os.makedirs(MEETINGS_DIR, exist_ok=True)
+    user_dir = f"user_{user_id}" if user_id else "unbound"
+    save_dir = os.path.join(MEETINGS_DIR, user_dir)
+    os.makedirs(save_dir, exist_ok=True)
+
     filename = f"{session_id}.wav"
-    filepath = os.path.join(MEETINGS_DIR, filename)
+    filepath = os.path.join(save_dir, filename)
 
     wav_bytes = pcm_to_wav(bytes(audio_buffer))
     with open(filepath, "wb") as f:
         f.write(wav_bytes)
 
+    rel_path = f"meetings/{user_dir}/{filename}"
     logger.info(f"Meeting audio saved: {filepath} ({len(audio_buffer)} bytes PCM -> {len(wav_bytes)} bytes WAV)")
-    return f"meetings/{filename}"
+    return rel_path
 
 
 async def _create_meeting_record(session, title: str) -> int:
@@ -116,7 +124,8 @@ async def meeting_end(session=None, **kwargs) -> ToolResult:
 
     # Save audio to file
     try:
-        audio_path = _save_meeting_audio(meeting_id, session._meeting_audio_buffer)
+        user_id = session.config.user_id if session.config.user_id else 0
+        audio_path = _save_meeting_audio(meeting_id, session._meeting_audio_buffer, user_id=user_id)
     except Exception as e:
         logger.error(f"Failed to save meeting audio: {e}")
         audio_path = ""
@@ -152,7 +161,9 @@ async def meeting_transcribe(session=None, **kwargs) -> ToolResult:
 
     # If buffer is empty (e.g. reconnected), try loading from file
     if not audio_buffer and session.meeting_session_id:
-        wav_path = os.path.join(MEETINGS_DIR, f"{session.meeting_session_id}.wav")
+        user_id = session.config.user_id if session.config.user_id else 0
+        user_dir = f"user_{user_id}" if user_id else "unbound"
+        wav_path = os.path.join(MEETINGS_DIR, user_dir, f"{session.meeting_session_id}.wav")
         if os.path.exists(wav_path):
             logger.info(f"Loading meeting audio from file: {wav_path}")
             with open(wav_path, "rb") as f:

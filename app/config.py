@@ -50,6 +50,9 @@ class Settings(BaseModel):
     # Auth / DB
     secret_key: str = os.getenv("SECRET_KEY", "change-me-in-production-please")
 
+    # Meeting cleanup
+    meeting_retention_days: int = int(os.getenv("MEETING_RETENTION_DAYS", "7"))
+
     # Audio parameters (PCM16)
     pcm_sample_rate: int = int(os.getenv("PCM_SAMPLE_RATE", "16000"))
     pcm_channels: int = int(os.getenv("PCM_CHANNELS", "1"))
