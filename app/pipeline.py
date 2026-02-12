@@ -352,6 +352,9 @@ async def _stream_music(ws, session, title: str, generator):
     try:
         batch = []
         sent = 0
+        batch_count = 0
+        pacing_start = None
+
         async for opus_packet in generator:
             if session.music_abort or ws.closed:
                 break
@@ -363,6 +366,9 @@ async def _stream_music(ws, session, title: str, generator):
                     break
                 logger.info(f"[{sid}] Music resumed at packet {sent}")
                 await ws_send_safe(ws, json.dumps({"type": "music_resume"}), session, "music_resume")
+                # Reset pacing after resume
+                pacing_start = None
+                batch_count = 0
 
             batch.append(opus_packet)
             if len(batch) >= BATCH_SIZE:
@@ -374,7 +380,21 @@ async def _stream_music(ws, session, title: str, generator):
                     break
                 sent += len(batch)
                 batch = []
-                await asyncio.sleep(MUSIC_BATCH_INTERVAL)
+                batch_count += 1
+
+                # Pre-buffer: send first N batches without delay
+                if batch_count < MUSIC_PRE_BUFFER_BATCHES:
+                    continue
+
+                # Wall-clock pacing for music
+                if pacing_start is None:
+                    pacing_start = time.monotonic()
+
+                paced_idx = batch_count - MUSIC_PRE_BUFFER_BATCHES
+                target = pacing_start + (paced_idx + 1) * MUSIC_BATCH_PERIOD
+                now = time.monotonic()
+                if now < target:
+                    await asyncio.sleep(target - now)
 
         if batch and not session.music_abort and not ws.closed:
             blob = b''
@@ -397,8 +417,13 @@ async def _stream_music(ws, session, title: str, generator):
 
 
 BATCH_SIZE = 10
-BATCH_INTERVAL = 0.5
-MUSIC_BATCH_INTERVAL = 0.55
+PRE_BUFFER_BATCHES = 2   # Send first 2 batches without delay (1.2s device buffer)
+FRAME_MS = 0.060          # 60ms per Opus frame
+PACING_FACTOR = 0.85      # Send at 85% of real-time (slightly faster than playback)
+BATCH_PERIOD = BATCH_SIZE * FRAME_MS * PACING_FACTOR  # ~510ms between paced batches
+
+MUSIC_PRE_BUFFER_BATCHES = 3  # Music needs more pre-buffer (generator is real-time)
+MUSIC_BATCH_PERIOD = BATCH_SIZE * FRAME_MS * 0.90  # ~540ms for music
 
 
 async def _stream_batched(
@@ -406,16 +431,22 @@ async def _stream_batched(
     session: Session,
     opus_packets: List[bytes],
 ) -> int:
-    """Send Opus packets in batches to reduce TCP segments."""
+    """Send Opus packets in batches with pre-buffer + wall-clock pacing.
+
+    Pre-buffer: first PRE_BUFFER_BATCHES sent without delay to fill device queue.
+    Paced phase: wall-clock scheduling at BATCH_PERIOD intervals, automatically
+    compensating for ws.send() latency (no fixed sleep after each send).
+    """
     sid = session.session_id
     total = len(opus_packets)
     num_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
 
     logger.info(f"[{sid}] TTS stream: {total} packets in {num_batches} batches "
-                f"(batch_size={BATCH_SIZE}, interval={BATCH_INTERVAL}s)")
+                f"(pre_buffer={PRE_BUFFER_BATCHES}, period={BATCH_PERIOD*1000:.0f}ms)")
 
     sent = 0
     t0 = time.monotonic()
+    pacing_start = None  # Wall-clock start of paced phase
 
     for batch_idx in range(num_batches):
         if session.tts_abort or ws.closed:
@@ -435,14 +466,29 @@ async def _stream_batched(
 
         if ok:
             sent += len(batch)
-            logger.info(f"[{sid}] Batch {batch_idx}/{num_batches}: "
-                        f"{len(batch)} pkts, {len(blob)}B, send={send_dt*1000:.0f}ms")
+            if batch_idx < PRE_BUFFER_BATCHES or batch_idx % 5 == 0 or batch_idx == num_batches - 1:
+                logger.info(f"[{sid}] Batch {batch_idx}/{num_batches}: "
+                            f"{len(batch)} pkts, {len(blob)}B, send={send_dt*1000:.0f}ms")
         else:
             logger.error(f"[{sid}] Batch {batch_idx} send FAILED after {send_dt:.1f}s")
             break
 
+        # Pre-buffer phase: send without delay
+        if batch_idx < PRE_BUFFER_BATCHES - 1:
+            continue
+
+        # Start wall-clock pacing after pre-buffer completes
+        if pacing_start is None:
+            pacing_start = time.monotonic()
+
+        # Schedule next batch by wall-clock (compensates for ws.send latency)
         if batch_idx < num_batches - 1:
-            await asyncio.sleep(BATCH_INTERVAL)
+            paced_idx = batch_idx - PRE_BUFFER_BATCHES + 1
+            target = pacing_start + (paced_idx + 1) * BATCH_PERIOD
+            now = time.monotonic()
+            if now < target:
+                await asyncio.sleep(target - now)
+            # If now >= target, we're behind schedule — send immediately
 
     elapsed = time.monotonic() - t0
     logger.info(f"[{sid}] TTS batched: {sent}/{total} in {elapsed:.1f}s "
