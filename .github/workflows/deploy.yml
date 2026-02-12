@@ -24,8 +24,8 @@ jobs:
           script: |
             echo "🚀 Starting HiTony server deployment..."
 
-            # Navigate to server directory (use correct path for tonypk25 user)
-            cd ~/echoear-server1 || cd ~tonypk25/echoear-server1 || { echo "❌ Directory not found"; exit 1; }
+            # Navigate to server directory (renamed from echoear-server1)
+            cd ~/hitony-server || cd ~tonypk25/hitony-server || cd ~/echoear-server1 || cd ~tonypk25/echoear-server1 || { echo "❌ Directory not found"; exit 1; }
 
             # Pull latest code
             echo "📦 Pulling latest code from GitHub..."
@@ -37,20 +37,20 @@ jobs:
             source .venv/bin/activate
             pip install -r requirements.txt --quiet
 
-            # Restart service
-            echo "🔄 Restarting hitony-server service..."
-            sudo systemctl restart echoear-server
+            # Restart service (try both old and new service names for compatibility)
+            echo "🔄 Restarting HiTony server service..."
+            sudo systemctl restart hitony-server 2>/dev/null || sudo systemctl restart echoear-server
 
             # Wait for service to start
             sleep 3
 
-            # Check service status
-            if sudo systemctl is-active --quiet echoear-server; then
+            # Check service status (check both names)
+            if sudo systemctl is-active --quiet hitony-server || sudo systemctl is-active --quiet echoear-server; then
               echo "✅ Deployment successful! Service is running."
-              sudo systemctl status echoear-server --no-pager -l | head -10
+              sudo systemctl status hitony-server --no-pager -l 2>/dev/null | head -10 || sudo systemctl status echoear-server --no-pager -l | head -10
             else
               echo "❌ Deployment failed! Service is not running."
-              sudo journalctl -u echoear-server -n 20 --no-pager
+              sudo journalctl -u hitony-server -n 20 --no-pager 2>/dev/null || sudo journalctl -u echoear-server -n 20 --no-pager
               exit 1
             fi
 

@@ -18,7 +18,7 @@ Every push to `main` branch automatically:
 
 Go to your GitHub repo settings and add these secrets:
 
-**Repository**: https://github.com/tonypk/echoear-server1
+**Repository**: https://github.com/tonypk/hitony-server
 
 Navigate to: **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
 
@@ -49,7 +49,7 @@ AAAED8Pi4oSRR2GRxUA0n1D8p3TMoWmWsdwJ84rUygBpSKAPpCLIWn5v7iSjgI1hBcacQH
 ## 📦 Step 2: Push Workflow to GitHub
 
 ```bash
-cd /Users/anna/Documents/xiaozhi/echoear-server/echoear-server1
+cd /Users/anna/Documents/hitony/hitony-server
 
 # Add and commit the workflow
 git add .github/workflows/deploy.yml CICD_SETUP.md
@@ -70,7 +70,7 @@ git push origin main
 After pushing, GitHub Actions will automatically run. You can:
 
 1. **Watch live deployment**:
-   - Go to https://github.com/tonypk/echoear-server1/actions
+   - Go to https://github.com/tonypk/hitony-server/actions
    - Click on the latest workflow run
    - Watch real-time logs
 
@@ -100,7 +100,7 @@ From now on, your workflow is:
 
 ```bash
 # 1. Make changes locally
-cd /Users/anna/Documents/xiaozhi/echoear-server/echoear-server1
+cd /Users/anna/Documents/hitony/hitony-server
 # ... edit files ...
 
 # 2. Commit and push
@@ -109,7 +109,7 @@ git commit -m "Your change description"
 git push
 
 # 3. GitHub Actions automatically deploys!
-# Watch it happen: https://github.com/tonypk/echoear-server1/actions
+# Watch it happen: https://github.com/tonypk/hitony-server/actions
 ```
 
 ## 🚨 Troubleshooting
@@ -123,7 +123,7 @@ git push
 - Verify service name matches: `echoear-server` (not `hitony-server` yet)
 
 ### Can't find directory
-- Current server path: `~/echoear-server1` or `~tonypk25/echoear-server1`
+- Current server path: `~/hitony-server` or `~tonypk25/echoear-server1`
 - If you renamed the directory, update `.github/workflows/deploy.yml`
 
 ## 📚 Advanced: Deployment Environments
