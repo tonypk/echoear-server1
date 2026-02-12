@@ -73,6 +73,8 @@ _HALLUCINATION_SUBSTRINGS = [
     "字幕由", "字幕提供", "subtitles by",
     "thank you for watching", "thanks for watching",
     "like and subscribe",
+    "明镜", "栏目", "支持明镜",
+    "请不吝", "视频来源",
 ]
 
 
@@ -100,7 +102,7 @@ async def transcribe_pcm(pcm_bytes: bytes, session: Optional[Session] = None) ->
         temperature=0,
         language="zh",
         # Whisper prompt: vocabulary hints for common commands
-        prompt="HiTony语音助手。播放音乐，放首歌，来一首，暂停，停止播放，继续播放，提醒我，今天天气怎么样，你好。",
+        prompt="HiTony语音助手。播放音乐，放首歌，来一首，暂停，停止播放，继续播放，提醒我，今天天气怎么样，倒计时，搜索，帮我查一下，开始会议，结束会议，你好。",
     )
 
     text = transcript.text.strip()
