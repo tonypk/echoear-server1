@@ -46,7 +46,7 @@ async def search_and_stream(query: str) -> Tuple[str, AsyncGenerator[bytes, None
     if duration > settings.music_max_duration_s:
         raise RuntimeError(f"Track too long ({duration}s > {settings.music_max_duration_s}s max)")
 
-    # Step 2: yt-dlp → ffmpeg pipe (no shell — avoids injection)
+    # Step 2: yt-dlp → ffmpeg pipe (manual piping for Python 3.11+ compatibility)
     ytdlp_proc = await asyncio.create_subprocess_exec(
         "yt-dlp", "-f", "bestaudio", "--no-warnings", "-o", "-", url,
         stdout=asyncio.subprocess.PIPE,
@@ -56,12 +56,24 @@ async def search_and_stream(query: str) -> Tuple[str, AsyncGenerator[bytes, None
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-i", "pipe:0",
         "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1",
-        stdin=ytdlp_proc.stdout,
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    # Allow ytdlp_proc.stdout to be consumed by ffmpeg
-    ytdlp_proc.stdout = None
+
+    # Manual pipe: ytdlp → ffmpeg (background task)
+    async def pipe_ytdlp_to_ffmpeg():
+        try:
+            while True:
+                chunk = await ytdlp_proc.stdout.read(65536)
+                if not chunk:
+                    break
+                ffmpeg_proc.stdin.write(chunk)
+                await ffmpeg_proc.stdin.drain()
+        finally:
+            ffmpeg_proc.stdin.close()
+
+    pipe_task = asyncio.create_task(pipe_ytdlp_to_ffmpeg())
 
     async def opus_generator() -> AsyncGenerator[bytes, None]:
         encoder = opuslib.Encoder(16000, 1, opuslib.APPLICATION_AUDIO)
@@ -84,6 +96,13 @@ async def search_and_stream(query: str) -> Tuple[str, AsyncGenerator[bytes, None
                 frame = buffer + b'\x00' * (FRAME_BYTES - len(buffer))
                 yield encoder.encode(frame, FRAME_SAMPLES)
         finally:
+            # Cancel manual piping task
+            pipe_task.cancel()
+            try:
+                await pipe_task
+            except asyncio.CancelledError:
+                pass
+
             for proc in (ffmpeg_proc, ytdlp_proc):
                 try:
                     proc.terminate()
