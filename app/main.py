@@ -265,6 +265,10 @@ _ADMIN_HTML = """<!doctype html>
       <label style="margin-top:12px">Tavily API Key <a href="https://tavily.com" target="_blank" style="font-size:0.8em">(1000 free/month)</a></label>
       <input id="s-tavily-key" type="password" placeholder="tvly-..."/>
       <p class="text-sm" id="s-tavily-key-status"></p>
+      <label style="margin-top:12px">YouTube Data API Key <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="font-size:0.8em">(Google Cloud Console)</a></label>
+      <input id="s-youtube-key" type="password" placeholder="AIza..."/>
+      <p class="text-sm" id="s-youtube-key-status"></p>
+      <p class="text-sm" style="color:#666">Used for music search. Free quota: ~100 searches/day. Without key, falls back to yt-dlp search.</p>
     </div>
     <button class="btn btn-primary mt" style="width:100%" onclick="saveSettings()">Save Settings</button>
   </div>
@@ -450,6 +454,8 @@ async function loadSettings() {
     document.getElementById('s-weather-city').value = s.weather_city || '';
     document.getElementById('s-tavily-key').value = '';
     document.getElementById('s-tavily-key-status').textContent = s.tavily_api_key_set ? 'Tavily API key is set' : 'No Tavily API key configured';
+    document.getElementById('s-youtube-key').value = '';
+    document.getElementById('s-youtube-key-status').textContent = s.youtube_api_key_set ? 'YouTube API key is set' : 'No YouTube API key (using yt-dlp search)';
   } catch(e) {}
 }
 
@@ -476,6 +482,8 @@ async function saveSettings() {
   body.weather_city = document.getElementById('s-weather-city').value.trim();
   const tavilyKey = document.getElementById('s-tavily-key').value;
   if (tavilyKey) body.tavily_api_key = tavilyKey;
+  const youtubeKey = document.getElementById('s-youtube-key').value;
+  if (youtubeKey) body.youtube_api_key = youtubeKey;
   try {
     await api('/api/settings', 'PUT', body);
     showMsg('set-msg', 'Settings saved', false);

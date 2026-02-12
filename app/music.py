@@ -1,9 +1,10 @@
-"""Music streaming: yt-dlp fetch -> ffmpeg -> Opus encode -> async generator."""
+"""Music streaming: YouTube API / yt-dlp search -> ffmpeg -> Opus encode -> async generator."""
 import asyncio
 import json
 import logging
-from typing import AsyncGenerator, Tuple
+from typing import AsyncGenerator, Optional, Tuple
 
+import httpx
 import opuslib
 
 from .config import settings
@@ -14,17 +15,41 @@ FRAME_SAMPLES = 960       # 60ms @ 16kHz
 FRAME_BYTES = FRAME_SAMPLES * 2  # 960 samples * 2 bytes (int16)
 READ_CHUNK = FRAME_BYTES * 4     # Read ~240ms at a time
 
+YOUTUBE_API_URL = "https://www.googleapis.com/youtube/v3/search"
 
-async def search_and_stream(query: str) -> Tuple[str, AsyncGenerator[bytes, None]]:
-    """Search YouTube and stream audio as Opus packets.
 
-    Returns (title, async_generator_of_opus_packets).
-    The generator yields one Opus packet (~60ms) at a time.
-    """
-    # Step 1: Get metadata (title) via yt-dlp --dump-json
+async def _youtube_api_search(query: str, api_key: str) -> Tuple[str, str, Optional[int]]:
+    """Search via YouTube Data API v3. Returns (title, video_url, duration_or_None)."""
+    params = {
+        "part": "snippet",
+        "q": query,
+        "type": "video",
+        "videoCategoryId": "10",  # Music category
+        "maxResults": 1,
+        "key": api_key,
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(YOUTUBE_API_URL, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+
+    items = data.get("items", [])
+    if not items:
+        raise RuntimeError(f"YouTube API: no results for '{query}'")
+
+    item = items[0]
+    video_id = item["id"]["videoId"]
+    title = item["snippet"]["title"]
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    logger.info(f"Music: YouTube API found '{title}' -> {url}")
+    return title, url, None  # duration not available from search.list
+
+
+async def _ytdlp_search(query: str) -> Tuple[str, str, int]:
+    """Search via yt-dlp ytsearch. Returns (title, video_url, duration)."""
     search_query = query if query.startswith("http") else f"ytsearch:{query}"
+    logger.info(f"Music: yt-dlp search for '{search_query}'")
 
-    logger.info(f"Music: fetching metadata for '{search_query}'")
     meta_proc = await asyncio.create_subprocess_exec(
         "yt-dlp", "--dump-json", "--no-download", search_query,
         stdout=asyncio.subprocess.PIPE,
@@ -40,13 +65,38 @@ async def search_and_stream(query: str) -> Tuple[str, AsyncGenerator[bytes, None
     title = info.get("title", "Unknown")
     url = info.get("webpage_url", search_query)
     duration = info.get("duration", 0)
-    logger.info(f"Music: '{title}' ({duration}s) url={url}")
+    return title, url, duration
 
-    # Enforce max duration
-    if duration > settings.music_max_duration_s:
+
+async def search_and_stream(query: str, youtube_api_key: str = "") -> Tuple[str, AsyncGenerator[bytes, None]]:
+    """Search YouTube and stream audio as Opus packets.
+
+    Returns (title, async_generator_of_opus_packets).
+    The generator yields one Opus packet (~60ms) at a time.
+
+    If youtube_api_key is provided, uses official YouTube Data API v3 for search.
+    Otherwise falls back to yt-dlp ytsearch.
+    """
+    is_url = query.startswith("http")
+
+    if is_url:
+        title, url, duration = await _ytdlp_search(query)
+    elif youtube_api_key:
+        try:
+            title, url, duration = await _youtube_api_search(query, youtube_api_key)
+        except Exception as e:
+            logger.warning(f"Music: YouTube API search failed ({e}), falling back to yt-dlp")
+            title, url, duration = await _ytdlp_search(query)
+    else:
+        title, url, duration = await _ytdlp_search(query)
+
+    logger.info(f"Music: '{title}' (duration={duration}) url={url}")
+
+    # Enforce max duration (skip if duration unknown from API search)
+    if duration and duration > settings.music_max_duration_s:
         raise RuntimeError(f"Track too long ({duration}s > {settings.music_max_duration_s}s max)")
 
-    # Step 2: yt-dlp → ffmpeg pipe (manual piping for Python 3.11+ compatibility)
+    # Stream audio: yt-dlp → ffmpeg pipe → Opus encode
     ytdlp_proc = await asyncio.create_subprocess_exec(
         "yt-dlp", "-f", "bestaudio", "--no-warnings", "-o", "-", url,
         stdout=asyncio.subprocess.PIPE,

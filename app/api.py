@@ -61,6 +61,7 @@ class SettingsUpdate(BaseModel):
     weather_api_key: Optional[str] = None
     weather_city: Optional[str] = None
     tavily_api_key: Optional[str] = None
+    youtube_api_key: Optional[str] = None
 
 class SettingsOut(BaseModel):
     openai_api_key_set: bool
@@ -73,6 +74,7 @@ class SettingsOut(BaseModel):
     weather_api_key_set: bool
     weather_city: str
     tavily_api_key_set: bool
+    youtube_api_key_set: bool
 
 
 # ── Auth ──────────────────────────────────────────────────────
@@ -195,6 +197,7 @@ async def get_settings(
         weather_api_key_set=bool(s.weather_api_key_enc),
         weather_city=s.weather_city or "",
         tavily_api_key_set=bool(s.tavily_api_key_enc),
+        youtube_api_key_set=bool(s.youtube_api_key_enc),
     )
 
 
@@ -231,6 +234,8 @@ async def update_settings(
         s.weather_city = req.weather_city
     if req.tavily_api_key is not None:
         s.tavily_api_key_enc = encrypt_secret(req.tavily_api_key) if req.tavily_api_key else ""
+    if req.youtube_api_key is not None:
+        s.youtube_api_key_enc = encrypt_secret(req.youtube_api_key) if req.youtube_api_key else ""
     await db.commit()
     logger.info(f"Settings updated for user {user.email}")
     return {"ok": True}

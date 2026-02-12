@@ -25,6 +25,7 @@ class UserConfig:
     weather_api_key: str = ""
     weather_city: str = ""
     tavily_api_key: str = ""
+    youtube_api_key: str = ""
 
     def get(self, field_name: str, fallback: str) -> str:
         """Return user value if set, otherwise fallback to global default."""

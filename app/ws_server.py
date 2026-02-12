@@ -205,6 +205,7 @@ async def _load_user_config(device_id: str, token: str) -> UserConfig | None:
                 weather_api_key=decrypt_secret(us.weather_api_key_enc) if us.weather_api_key_enc else "",
                 weather_city=us.weather_city or "",
                 tavily_api_key=decrypt_secret(us.tavily_api_key_enc) if us.tavily_api_key_enc else "",
+                youtube_api_key=decrypt_secret(us.youtube_api_key_enc) if us.youtube_api_key_enc else "",
             )
     except Exception as e:
         logger.error(f"DB auth error for {device_id}: {e}")

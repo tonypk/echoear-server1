@@ -11,8 +11,12 @@ from ..registry import register_tool, ToolResult, ToolParam
 async def youtube_play(query: str, session=None, **kwargs) -> ToolResult:
     from ...music import search_and_stream
 
+    youtube_api_key = ""
+    if session and hasattr(session, "config"):
+        youtube_api_key = session.config.youtube_api_key or ""
+
     try:
-        title, generator = await search_and_stream(query)
+        title, generator = await search_and_stream(query, youtube_api_key=youtube_api_key)
         return ToolResult(
             type="music",
             text=f"正在播放: {title}",
