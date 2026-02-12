@@ -1,0 +1,66 @@
+name: Deploy to GCE Server
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: 22
+          script: |
+            echo "🚀 Starting HiTony server deployment..."
+
+            # Navigate to server directory (use correct path for tonypk25 user)
+            cd ~/echoear-server1 || cd ~tonypk25/echoear-server1 || { echo "❌ Directory not found"; exit 1; }
+
+            # Pull latest code
+            echo "📦 Pulling latest code from GitHub..."
+            git fetch origin
+            git reset --hard origin/main
+
+            # Install/update dependencies
+            echo "📚 Updating dependencies..."
+            source .venv/bin/activate
+            pip install -r requirements.txt --quiet
+
+            # Restart service
+            echo "🔄 Restarting hitony-server service..."
+            sudo systemctl restart echoear-server
+
+            # Wait for service to start
+            sleep 3
+
+            # Check service status
+            if sudo systemctl is-active --quiet echoear-server; then
+              echo "✅ Deployment successful! Service is running."
+              sudo systemctl status echoear-server --no-pager -l | head -10
+            else
+              echo "❌ Deployment failed! Service is not running."
+              sudo journalctl -u echoear-server -n 20 --no-pager
+              exit 1
+            fi
+
+            echo "🎉 HiTony server deployment complete!"
+
+      - name: Notify deployment status
+        if: always()
+        run: |
+          if [ ${{ job.status }} == 'success' ]; then
+            echo "✅ Deployment succeeded"
+          else
+            echo "❌ Deployment failed"
+          fi
