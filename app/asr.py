@@ -56,11 +56,24 @@ def _pcm_to_wav(pcm_bytes: bytes) -> bytes:
 
 # Whisper hallucination patterns — produced from silence/noise input
 _HALLUCINATIONS = {
+    # English
     "thank you", "thank you for watching", "thanks for watching",
     "thanks", "bye", "goodbye", "all right", "you", "the end",
     "subscribe", "like and subscribe", "see you next time",
     "so", "okay", "yeah", "yes", "no", "hmm", "uh",
+    # Chinese
+    "谢谢观看", "感谢观看", "请订阅", "点赞", "订阅",
+    "谢谢大家", "谢谢", "再见", "好的", "嗯",
+    "字幕", "字幕由", "字幕提供",
 }
+
+# Longer hallucination patterns — match as substrings
+_HALLUCINATION_SUBSTRINGS = [
+    "点赞", "订阅", "转发", "打赏", "关注",
+    "字幕由", "字幕提供", "subtitles by",
+    "thank you for watching", "thanks for watching",
+    "like and subscribe",
+]
 
 
 async def transcribe_pcm(pcm_bytes: bytes, session: Optional[Session] = None) -> str:
@@ -85,18 +98,25 @@ async def transcribe_pcm(pcm_bytes: bytes, session: Optional[Session] = None) ->
         model=asr_model,
         file=wav_file,
         temperature=0,
-        # Optimized prompt for fast speech and mixed languages
-        # 提示词优化：明确快速说话场景，提高识别准确度
-        prompt="HiTony语音助手对话。用户可能快速说话，使用中文、英文或混合语言。Natural conversation, fast speech, Chinese/English mixed.",
+        language="zh",
+        # Whisper prompt: vocabulary hints for common commands
+        prompt="HiTony语音助手。播放音乐，放首歌，来一首，暂停，停止播放，继续播放，提醒我，今天天气怎么样，你好。",
     )
 
     text = transcript.text.strip()
     logger.info(f"ASR result: {text}")
 
     # Filter known Whisper hallucinations (noise/silence → fake output)
-    normalized = text.lower().rstrip(".!?,")
+    normalized = text.lower().rstrip(".!?,。！？，")
     if normalized in _HALLUCINATIONS:
-        logger.warning(f"ASR: filtered hallucination: '{text}'")
+        logger.warning(f"ASR: filtered hallucination (exact): '{text}'")
         return ""
+
+    # Substring hallucination check (YouTube-style garbage)
+    lower_text = text.lower()
+    for pattern in _HALLUCINATION_SUBSTRINGS:
+        if pattern in lower_text:
+            logger.warning(f"ASR: filtered hallucination (substring '{pattern}'): '{text}'")
+            return ""
 
     return text
