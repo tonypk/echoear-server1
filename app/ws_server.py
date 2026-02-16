@@ -61,6 +61,22 @@ async def handle_text_message(ws: WebSocketServerProtocol, session: Session, tex
             session.protocol_version = 2
             logger.info(f"[{session.session_id}] Xiaozhi protocol v2, listen_mode={listen_mode}")
 
+        # Track firmware version
+        fw_version = payload.get("fw", "")
+        if fw_version:
+            session.fw_version = fw_version
+            logger.info(f"[{session.session_id}] Device firmware: v{fw_version}")
+            # Update DB
+            try:
+                async with async_session_factory() as db:
+                    result = await db.execute(select(Device).where(Device.device_id == session.device_id))
+                    dev = result.scalar_one_or_none()
+                    if dev:
+                        dev.fw_version = fw_version
+                        await db.commit()
+            except Exception as e:
+                logger.warning(f"Failed to update fw_version in DB: {e}")
+
         hello_resp = {
             "type": "hello",
             "session_id": session.session_id,

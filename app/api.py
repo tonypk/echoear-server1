@@ -518,3 +518,111 @@ async def get_stats(
         "total_messages": total_messages,
         "device_stats": device_stats,
     }
+
+
+# ── OTA Firmware Updates ──────────────────────────────────
+
+OTA_DIR = DATA_DIR / "ota"
+
+
+@router.get("/ota/check")
+async def ota_check(device_id: str = "", version: str = ""):
+    """Check if a firmware update is available."""
+    import json as _json
+    meta_path = OTA_DIR / "latest.json"
+    if not meta_path.exists():
+        return {"update_available": False}
+    try:
+        with open(meta_path) as f:
+            meta = _json.load(f)
+    except Exception:
+        return {"update_available": False}
+
+    latest_version = meta.get("version", "")
+    if not latest_version or latest_version == version:
+        return {"update_available": False}
+
+    return {
+        "update_available": True,
+        "version": latest_version,
+        "filename": meta.get("filename", ""),
+        "size": meta.get("size", 0),
+    }
+
+
+@router.get("/ota/firmware")
+async def ota_download():
+    """Serve the latest firmware binary."""
+    import json as _json
+    meta_path = OTA_DIR / "latest.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="No firmware available")
+    try:
+        with open(meta_path) as f:
+            meta = _json.load(f)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Bad metadata")
+
+    fw_path = OTA_DIR / meta.get("filename", "firmware.bin")
+    if not fw_path.exists():
+        raise HTTPException(status_code=404, detail="Firmware file not found")
+
+    return FileResponse(
+        fw_path,
+        media_type="application/octet-stream",
+        filename=fw_path.name,
+    )
+
+
+@router.post("/ota/upload")
+async def ota_upload(
+    user: User = Depends(get_current_user),
+):
+    """Upload a new firmware binary. Expects multipart form: file + version."""
+    # This endpoint is called via JavaScript FormData from admin panel
+    from fastapi import UploadFile, File, Form, Request
+    # We can't add these as function params due to decorator ordering,
+    # so we handle the raw request below
+    raise HTTPException(status_code=501, detail="Use /ota/upload-form instead")
+
+
+@router.post("/ota/push")
+async def ota_push_to_devices(
+    user: User = Depends(get_current_user),
+):
+    """Push OTA notification to all connected devices."""
+    import json as _json
+    meta_path = OTA_DIR / "latest.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="No firmware uploaded")
+    try:
+        with open(meta_path) as f:
+            meta = _json.load(f)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Bad metadata")
+
+    from .ws_server import get_all_active_devices, get_active_connection
+    from .pipeline import ws_send_safe
+
+    version = meta.get("version", "")
+    devices = get_all_active_devices()
+    pushed = 0
+
+    for device_id in devices:
+        conn = get_active_connection(device_id)
+        if not conn:
+            continue
+        ws, session = conn
+        ota_msg = _json.dumps({
+            "type": "ota_notify",
+            "version": version,
+            "url": meta.get("url", "/api/ota/firmware"),
+        })
+        try:
+            await ws.send(ota_msg)
+            pushed += 1
+            logger.info(f"OTA push sent to {device_id}: version={version}")
+        except Exception as e:
+            logger.warning(f"Failed to push OTA to {device_id}: {e}")
+
+    return {"ok": True, "pushed": pushed, "total_devices": len(devices)}

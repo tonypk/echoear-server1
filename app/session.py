@@ -48,6 +48,7 @@ class Session:
         self.processing = False
         self.listen_mode: Optional[str] = None
         self.protocol_version: int = 1
+        self.fw_version: str = ""
         self._process_task: Optional[asyncio.Task] = None
 
         # Activity tracking (xiaozhi pattern)

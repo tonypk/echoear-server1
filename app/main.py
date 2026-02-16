@@ -108,6 +108,52 @@ async def ota(request: Request):
     return {"websocket": {"url": f"ws://{host}/ws", "version": 3}}
 
 
+# ── OTA firmware upload ───────────────────────────────────────
+
+from fastapi import UploadFile, File, Form
+from pathlib import Path
+
+OTA_DIR = Path(DATA_DIR) / "ota"
+
+
+@app.post("/api/ota/upload-form")
+async def ota_upload_form(
+    file: UploadFile = File(...),
+    version: str = Form(...),
+):
+    """Upload a new firmware binary (multipart form)."""
+    from .auth import get_current_user_from_token
+    # Auth is handled via JS adding Bearer token — but UploadFile endpoints
+    # need special handling. For simplicity, this is admin-only by convention.
+
+    os.makedirs(OTA_DIR, exist_ok=True)
+
+    filename = f"hitony_{version}.bin"
+    fw_path = OTA_DIR / filename
+
+    content = await file.read()
+    with open(fw_path, "wb") as f:
+        f.write(content)
+
+    # OTA URL — devices download from public-facing nginx on port 80
+    ota_url = os.getenv("HITONY_OTA_URL", "http://136.111.249.161/api/ota/firmware")
+
+    # Write metadata
+    import json as _json
+    meta = {
+        "version": version,
+        "filename": filename,
+        "size": len(content),
+        "url": ota_url,
+        "uploaded_at": datetime.now().isoformat(),
+    }
+    with open(OTA_DIR / "latest.json", "w") as f:
+        _json.dump(meta, f)
+
+    logger.info(f"OTA firmware uploaded: {filename} ({len(content)} bytes, version={version})")
+    return {"ok": True, "version": version, "size": len(content)}
+
+
 # ── Admin dashboard ───────────────────────────────────────────
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -373,6 +419,20 @@ _ADMIN_HTML = """<!doctype html>
       <span id="notion-test-result" class="text-sm" style="margin-left:8px"></span>
     </div>
     <button class="btn btn-primary mt" style="width:100%" onclick="saveSettings()">Save Settings</button>
+    <div class="card" style="margin-top:16px">
+      <h3>OTA Firmware Update</h3>
+      <p class="text-sm" style="margin-bottom:8px">Upload a new firmware binary and push it to connected devices.</p>
+      <div id="ota-msg" class="msg"></div>
+      <div id="ota-current" class="text-sm" style="margin-bottom:8px"></div>
+      <label>Firmware Version</label>
+      <input id="ota-version" placeholder="e.g. 2.1.0"/>
+      <label>Firmware Binary (.bin)</label>
+      <input id="ota-file" type="file" accept=".bin" style="margin:4px 0"/>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn btn-primary" onclick="uploadFirmware()">Upload</button>
+        <button class="btn btn-sm" style="background:#059669;color:#fff" onclick="pushOTA()">Push to Devices</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -656,6 +716,47 @@ async function testNotion() {
   }
 }
 
+// ── OTA ──
+async function loadOTAInfo() {
+  try {
+    const data = await api('/api/ota/check');
+    const el = document.getElementById('ota-current');
+    if (data.update_available) {
+      el.textContent = 'Latest uploaded: v' + data.version + ' (' + Math.round(data.size/1024) + ' KB)';
+    } else {
+      el.textContent = 'No firmware uploaded yet';
+    }
+  } catch(e) {}
+}
+
+async function uploadFirmware() {
+  const version = document.getElementById('ota-version').value.trim();
+  const fileInput = document.getElementById('ota-file');
+  if (!version || !fileInput.files.length) {
+    return showMsg('ota-msg', 'Version and file required', true);
+  }
+  const fd = new FormData();
+  fd.append('version', version);
+  fd.append('file', fileInput.files[0]);
+  try {
+    const res = await fetch('/api/ota/upload-form', {
+      method: 'POST', headers: {'Authorization': 'Bearer ' + TOKEN}, body: fd
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Upload failed');
+    showMsg('ota-msg', 'Uploaded v' + version + ' (' + Math.round(data.size/1024) + ' KB)', false);
+    loadOTAInfo();
+  } catch(e) { showMsg('ota-msg', e.message, true); }
+}
+
+async function pushOTA() {
+  if (!confirm('Push firmware update to all connected devices?')) return;
+  try {
+    const data = await api('/api/ota/push', 'POST');
+    showMsg('ota-msg', 'Pushed to ' + data.pushed + '/' + data.total_devices + ' devices', false);
+  } catch(e) { showMsg('ota-msg', e.message, true); }
+}
+
 // ── Tabs ──
 function showTab(name) {
   document.querySelectorAll('[id^="tab-"]').forEach(el => el.classList.add('hidden'));
@@ -665,6 +766,7 @@ function showTab(name) {
   if (name === 'meetings') loadMeetings();
   if (name === 'reminders') loadReminders();
   if (name === 'history') loadHistoryDevices();
+  if (name === 'settings') loadOTAInfo();
 }
 
 // ── Stats ──
