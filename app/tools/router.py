@@ -19,20 +19,25 @@ class RouteMatch:
 _RULES: List[Tuple[re.Pattern, str, callable, str]] = []
 
 
+def _strip_punctuation(text: str) -> str:
+    """Strip trailing Chinese/English punctuation from text."""
+    return text.rstrip("。！？，、；：…—.!?,;:")
+
+
 def _build_rules():
     global _RULES
 
     rules = [
         # ── Music playback (with query) ─────────────────
-        # "帮我播放..." / "请播放..." prefix support
-        (r"^(?:帮我|请|能不能|可以)?\s*(?:播放|放|来一首|我想听|放首|听一?(?:首|个)?)\s+(.+)",
+        # Chinese: \s* (no space needed between command and query)
+        (r"^(?:帮我|请|能不能|可以)?\s*(?:播放|放|来一首|我想听|放首|听一?(?:首|个)?)\s*(.+)",
          "youtube.play",
-         lambda m: {"query": m.group(1).strip()},
+         lambda m: {"query": _strip_punctuation(m.group(1).strip())},
          "正在为你播放{query}"),
 
         (r"^(?:play|put on|listen to)\s+(.+)",
          "youtube.play",
-         lambda m: {"query": m.group(1).strip()},
+         lambda m: {"query": _strip_punctuation(m.group(1).strip())},
          "Playing {query}"),
 
         # ── Generic music (no specific query) ────────────
@@ -92,9 +97,9 @@ def _build_rules():
          "meeting.transcribe", lambda m: {}, "正在转录"),
 
         # ── Web search ────────────────────────────────────
-        (r"^(?:搜索|搜一下|查一下|帮我查|百度|谷歌|search)\s+(.+)",
+        (r"^(?:搜索|搜一下|查一下|帮我查|百度|谷歌|search)\s*(.+)",
          "web.search",
-         lambda m: {"query": m.group(1).strip()},
+         lambda m: {"query": _strip_punctuation(m.group(1).strip())},
          "正在搜索{query}"),
 
         # ── Conversation reset ────────────────────────────
@@ -104,7 +109,7 @@ def _build_rules():
         # ── Voice note → Notion ──────────────────────────
         (r"^(?:记一下|记录一下|笔记|帮我记|备忘|note)\s*[,，:：]?\s*(.+)",
          "note.save",
-         lambda m: {"content": m.group(1).strip()},
+         lambda m: {"content": _strip_punctuation(m.group(1).strip())},
          "正在记录"),
     ]
 
