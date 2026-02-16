@@ -84,6 +84,10 @@ async def _check_and_deliver():
                 if success:
                     reminder.delivered = 1
                     logger.info(f"Reminder #{reminder.id} delivered via TTS")
+
+                    # If this is a recurring reminder, create the next occurrence
+                    if reminder.is_recurring and reminder.recurrence_rule:
+                        await _create_next_recurrence(db, reminder)
                 else:
                     # Check if reminder is very overdue (>1 hour) — mark as failed
                     overdue_seconds = (now - reminder.remind_at).total_seconds()
@@ -99,6 +103,39 @@ async def _check_and_deliver():
 
     except Exception as e:
         logger.error(f"Reminder scheduler error: {e}")
+
+
+async def _create_next_recurrence(db, parent_reminder: Reminder):
+    """Create the next occurrence of a recurring reminder."""
+    from .recurrence import calculate_next_occurrence
+
+    next_time = calculate_next_occurrence(
+        parent_reminder.remind_at,
+        parent_reminder.recurrence_rule
+    )
+
+    if not next_time:
+        logger.warning(
+            f"Cannot calculate next occurrence for reminder #{parent_reminder.id}, "
+            f"rule: {parent_reminder.recurrence_rule}"
+        )
+        return
+
+    # Create a new reminder instance
+    new_reminder = Reminder(
+        user_id=parent_reminder.user_id,
+        device_id=parent_reminder.device_id,
+        remind_at=next_time,
+        message=parent_reminder.message,
+        delivered=0,
+        is_recurring=parent_reminder.is_recurring,
+        recurrence_rule=parent_reminder.recurrence_rule,
+    )
+    db.add(new_reminder)
+    logger.info(
+        f"Created recurring reminder: '{new_reminder.message}' "
+        f"at {next_time.strftime('%Y-%m-%d %H:%M')}"
+    )
 
 
 async def start_reminder_scheduler():

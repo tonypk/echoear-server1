@@ -36,8 +36,10 @@ Music rules:
 - Pause → "player.pause", Stop → "player.stop", Resume → "player.resume"
 
 Reminder rules:
-- Use tool "reminder.set" with ISO datetime and message
+- Use tool "reminder.set" with ISO datetime, message, and optional recurrence
 - Parse date/time relative to today. If no time specified, default to 09:00.
+- For recurring reminders, set recurrence to: "daily" (每天), "weekly" (每周), "monthly" (每月), "weekdays" (工作日), or "HH:MM" (每天固定时间如"08:00")
+- Examples: "每天8点提醒我吃药" → recurrence="08:00", "每周一提醒我开会" → recurrence="weekly"
 
 Meeting rules:
 - Start recording → "meeting.start"
@@ -73,6 +75,7 @@ Examples:
 - "暂停" → {{"tool": "player.pause", "args": {{}}, "reply_hint": "已暂停", "emotion": "neutral"}}
 - "停止播放" → {{"tool": "player.stop", "args": {{}}, "reply_hint": "已停止", "emotion": "neutral"}}
 - "提醒我明天下午3点开会" → {{"tool": "reminder.set", "args": {{"datetime_iso": "2026-02-13T15:00:00", "message": "开会", "response": "好的，已设置明天下午3点提醒你开会"}}, "reply_hint": "设置提醒", "emotion": "happy"}}
+- "每天早上8点提醒我吃药" → {{"tool": "reminder.set", "args": {{"datetime_iso": "2026-02-17T08:00:00", "message": "吃药", "recurrence": "08:00", "response": "好的，已设置每天早上8点提醒你吃药"}}, "reply_hint": "设置循环提醒", "emotion": "happy"}}
 - "开始会议" → {{"tool": "meeting.start", "args": {{}}, "reply_hint": "开始录音", "emotion": "neutral"}}
 - "结束会议" → {{"tool": "meeting.end", "args": {{}}, "reply_hint": "录音结束", "emotion": "happy"}}
 - "今天天气怎么样" → {{"tool": "weather.query", "args": {{"query": "今天天气"}}, "reply_hint": "正在查询天气", "emotion": "thinking"}}

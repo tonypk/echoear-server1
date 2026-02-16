@@ -95,4 +95,8 @@ class Reminder(Base):
     delivered = Column(Integer, default=0)  # 0=pending, 1=delivered, 2=failed
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
+    # Recurring reminder support
+    is_recurring = Column(Integer, default=0)  # 0=one-time, 1=recurring
+    recurrence_rule = Column(String(64), default="")  # "daily", "weekly", "monthly", "HH:MM", or cron
+
     owner = relationship("User")
