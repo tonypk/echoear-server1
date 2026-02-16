@@ -56,6 +56,23 @@ def _build_rules():
         (r"^(?:停止|停止播放|停|别放了|别播了|stop)$",
          "player.stop", lambda m: {}, "已停止"),
 
+        # ── Volume controls ──────────────────────────────
+        (r"^(?:音量|声音|volume)\s*(?:设为|设置为|调到|set to)?\s*(\d+)(?:%|百分之)?$",
+         "volume.set",
+         lambda m: {"level": int(m.group(1))},
+         "音量已设为{level}%"),
+
+        (r"^(?:音量|声音)?(?:大一?(?:点|些)|增大|提高|调高|加大|louder|volume up|turn up)$",
+         "volume.up", lambda m: {}, "音量已增大"),
+
+        (r"^(?:音量|声音)?(?:小一?(?:点|些)|减小|降低|调低|quieter|volume down|turn down)$",
+         "volume.down", lambda m: {}, "音量已减小"),
+
+        (r"^(?:静音|mute)$",
+         "volume.set",
+         lambda m: {"level": 0},
+         "已静音"),
+
         # ── Timer ─────────────────────────────────────────
         (r"^(?:倒计时|计时)\s*(\d+)\s*(?:分钟|分)$",
          "timer.set",
