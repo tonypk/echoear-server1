@@ -77,6 +77,56 @@ Pro模式支持任何OpenAI-compatible API，包括但不限于：
 
 ---
 
+## 灵活配置：完整版 vs 精简版
+
+Pro模式支持**两种OpenClaw部署方式**：
+
+### 场景1：完整版OpenClaw（ASR + LLM + TTS）
+
+**配置**：
+```json
+{
+  "openai_base_url": "https://openclaw-full.example.com/v1",
+  "openai_api_key": "sk-xxxxxxxx"
+}
+```
+
+**行为**：
+- ✅ ASR（语音识别）→ 用户OpenClaw
+- ✅ LLM（智能对话）→ 用户OpenClaw
+- ✅ TTS（语音合成）→ 用户OpenClaw
+
+### 场景2：精简版OpenClaw（仅LLM）
+
+**配置**：
+```json
+{
+  "openai_base_url": "https://openclaw-lite.example.com/v1",
+  "openai_api_key": "sk-xxxxxxxx"
+}
+```
+
+**行为**：
+- ⚠️ ASR（语音识别）→ 尝试用户OpenClaw → **失败** → 自动回退到HiTony默认API
+- ✅ LLM（智能对话）→ 用户OpenClaw
+- ⚠️ TTS（语音合成）→ 尝试用户OpenClaw → **失败** → 自动回退到HiTony默认API
+
+### 自动回退机制
+
+**工作原理**：
+1. 系统首先尝试使用用户配置的OpenClaw端点
+2. 如果返回404或不支持该功能（ASR/TTS），自动回退到HiTony默认API
+3. 回退过程透明，用户无感知
+4. 日志记录回退事件：`ASR/TTS: Pro mode failed, falling back to default API`
+
+**优势**：
+- 🎯 **无需额外配置**：系统自动检测OpenClaw功能
+- 🔄 **智能适应**：适配不同OpenClaw部署方式
+- 💰 **成本优化**：精简版OpenClaw只需部署LLM（降低成本）
+- 🚀 **性能保证**：即使部分功能不可用，系统仍能正常运行
+
+---
+
 ## 安全性说明
 
 1. **数据隐私**：所有AI请求直接发送到您的OpenClaw实例，HiTony服务器不保存任何API响应内容

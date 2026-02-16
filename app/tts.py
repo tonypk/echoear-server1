@@ -72,15 +72,30 @@ async def synthesize_tts(text: str, session: Optional[Session] = None) -> list:
 
     logger.info(f"TTS: synthesizing '{text[:50]}...' with {tts_model}/{tts_voice}")
 
-    response = await client.audio.speech.create(
-        model=tts_model,
-        voice=tts_voice,
-        input=text,
-        response_format="pcm",  # Raw PCM16 24kHz mono
-    )
-
-    pcm_24k = response.content
-    logger.info(f"TTS: received {len(pcm_24k)} bytes PCM (24kHz)")
+    # Try user's OpenClaw first (Pro mode), fallback to default if unsupported
+    try:
+        response = await client.audio.speech.create(
+            model=tts_model,
+            voice=tts_voice,
+            input=text,
+            response_format="pcm",  # Raw PCM16 24kHz mono
+        )
+        pcm_24k = response.content
+        logger.info(f"TTS: received {len(pcm_24k)} bytes PCM (24kHz)")
+    except Exception as e:
+        # Fallback to default API if user's OpenClaw doesn't support TTS
+        if session and session.config.openai_base_url:
+            logger.warning(f"TTS: Pro mode failed ({e}), falling back to default API")
+            response = await _client.audio.speech.create(
+                model=settings.openai_tts_model,
+                voice=settings.openai_tts_voice,
+                input=text,
+                response_format="pcm",
+            )
+            pcm_24k = response.content
+            logger.info(f"TTS: fallback received {len(pcm_24k)} bytes PCM (24kHz)")
+        else:
+            raise  # Re-raise if not in Pro mode
 
     # Run CPU-bound resample + Opus encode in thread pool to avoid blocking event loop.
     loop = asyncio.get_event_loop()
