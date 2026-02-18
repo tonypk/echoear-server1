@@ -1,0 +1,37 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["app"]
+omit = [
+    # I/O-heavy modules requiring real DB/API/WS connections
+    "app/main.py",
+    "app/database.py",
+    "app/models.py",
+    "app/music.py",
+    "app/scheduler.py",
+    "app/edge_tts_synth.py",
+    "app/meeting_notifications.py",
+    "app/protocol.py",
+    "app/registry.py",
+    "app/api.py",
+    "app/pipeline.py",
+    "app/ws_server.py",
+    # DB-heavy tools (require full async DB fixtures)
+    "app/tools/builtin/alarm.py",
+    "app/tools/builtin/reminder.py",
+    "app/tools/builtin/meeting.py",
+    "app/tools/builtin/briefing.py",
+    "app/tools/builtin/notion.py",
+    "app/tools/builtin/weather.py",
+    "app/tools/builtin/search.py",
+    "app/tools/builtin/youtube.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80

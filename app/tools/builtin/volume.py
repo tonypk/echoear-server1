@@ -5,7 +5,7 @@ from ..registry import register_tool, ToolResult, ToolParam
 
 async def _send_volume(session, level: int) -> bool:
     """Send volume command to device via WS. Returns True on success."""
-    from ..ws_server import get_active_connection
+    from ...ws_server import get_active_connection
 
     conn = get_active_connection(session.device_id) if hasattr(session, 'device_id') else None
     if not conn:
