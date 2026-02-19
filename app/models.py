@@ -29,6 +29,7 @@ class Device(Base):
     last_seen = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     conversation_json = Column(Text, default="[]")
+    preferences_json = Column(Text, default="{}")  # key-value user preferences
 
     owner = relationship("User", back_populates="devices")
 

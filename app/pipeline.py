@@ -262,6 +262,8 @@ async def _process_and_speak(ws, session, text: str):
         pending["partial_args"][pending["missing_param"]] = text
         tool_name = pending["tool"]
         args = pending["partial_args"]
+        # Store the follow-up answer in history
+        append_user_message(session.device_id, text)
         logger.info(f"[{sid}] Follow-up: {tool_name}, filled {pending['missing_param']}={text}")
 
     # 2. Try rule-based router (< 10ms, no LLM)
@@ -272,9 +274,11 @@ async def _process_and_speak(ws, session, text: str):
             args = match.args
             reply_hint = match.reply_hint
             emotion = _infer_emotion(tool_name)
-            # Add user+hint to conversation history (LLM path handles its own)
+            # Add user message to conversation history (LLM path handles its own)
             append_user_message(session.device_id, text)
-            if reply_hint:
+            # For chat (greetings), the hint IS the final response — store it now
+            # For tool calls, don't store hint — actual result stored after execution
+            if tool_name == "chat" and reply_hint:
                 append_assistant_message(session.device_id, reply_hint)
             logger.info(f"[{sid}] Router: {tool_name}")
 
@@ -358,6 +362,9 @@ async def _process_and_speak(ws, session, text: str):
         generator = result.data.get("generator")
         if generator:
             await _stream_music(ws, session, title, generator)
+        # Store music action in conversation history
+        if title:
+            append_assistant_message(session.device_id, f"正在播放: {title}")
 
     elif result.type == "tts":
         try:
@@ -373,8 +380,9 @@ async def _process_and_speak(ws, session, text: str):
             if tts_session_open:
                 await ws_send_safe(ws, json.dumps({"type": "tts_end"}), session, "tts_end")
         tts_session_open = False
-        # Capture tool result in conversation history
-        append_assistant_message(session.device_id, result.text)
+        # Capture tool result in conversation history (unless tool opted out)
+        if not result.skip_history:
+            append_assistant_message(session.device_id, result.text)
 
     elif result.type == "ask_user":
         if tts_session_open:

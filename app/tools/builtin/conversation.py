@@ -32,4 +32,4 @@ async def conversation_reset(session=None, **kwargs) -> ToolResult:
         except Exception as e:
             logger.error(f"Failed to clear conversation in DB: {e}")
 
-    return ToolResult(type="tts", text="好的，对话已清空，让我们重新开始吧")
+    return ToolResult(type="tts", text="好的，对话已清空，让我们重新开始吧", skip_history=True)

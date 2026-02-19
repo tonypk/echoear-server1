@@ -20,6 +20,7 @@ class ToolResult:
     type: str  # "tts" | "music" | "ask_user" | "silent" | "error"
     text: str = ""
     data: Dict[str, Any] = field(default_factory=dict)
+    skip_history: bool = False  # If True, don't store result in conversation history
 
 
 @dataclass

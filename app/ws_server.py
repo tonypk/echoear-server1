@@ -16,7 +16,8 @@ from sqlalchemy import select
 from .config import settings
 from .session import Session, UserConfig
 from .pipeline import run_pipeline, ws_send_safe
-from .llm import reset_conversation, load_conversation, get_conversation
+from .llm import reset_conversation, load_conversation, get_conversation, MAX_HISTORY
+from .preferences import load_preferences, get_preferences, clear_preferences
 from .database import async_session_factory
 from .models import Device, UserSettings
 from .auth import verify_token, decrypt_secret
@@ -174,13 +175,16 @@ def _launch_pipeline(ws: WebSocketServerProtocol, session: Session):
 async def _pipeline_wrapper(ws: WebSocketServerProtocol, session: Session):
     """Wrapper to catch unhandled exceptions from the pipeline."""
     my_task = asyncio.current_task()
+    should_save = False
     try:
         await run_pipeline(ws, session)
+        should_save = True
     except asyncio.CancelledError:
         logger.info(f"[{session.session_id}] Pipeline cancelled")
         # Only clear processing if we're still the active pipeline (avoid clobbering new task)
         if session._process_task is my_task:
             session.processing = False
+        # Don't save — history may be in partial state (user msg added, no assistant reply yet)
     except Exception as e:
         logger.error(f"[{session.session_id}] UNHANDLED in pipeline: {type(e).__name__}: {e}")
         logger.error(traceback.format_exc())
@@ -190,6 +194,26 @@ async def _pipeline_wrapper(ws: WebSocketServerProtocol, session: Session):
             await ws_send_safe(ws, json.dumps({"type": "error", "message": f"Internal error: {e}"}), session)
         except Exception:
             pass
+        should_save = True  # Save on error too — history is still valid
+    finally:
+        if should_save:
+            await _save_conversation(session.device_id, session.session_id)
+
+
+async def _save_conversation(device_id: str, session_id: str):
+    """Save conversation history to DB after each pipeline run."""
+    try:
+        conv = get_conversation(device_id)
+        if not conv:
+            return
+        async with async_session_factory() as db:
+            result = await db.execute(select(Device).where(Device.device_id == device_id))
+            device_record = result.scalar_one_or_none()
+            if device_record:
+                device_record.conversation_json = json.dumps(conv[-MAX_HISTORY:], ensure_ascii=False)
+                await db.commit()
+    except Exception as e:
+        logger.warning(f"[{session_id}] Failed to save conversation: {e}")
 
 
 async def _load_user_config(device_id: str, token: str) -> UserConfig | None:
@@ -268,17 +292,22 @@ async def handle_client(ws: WebSocketServerProtocol, path: str):
     # Register active connection for server-push (reminders, etc.)
     _active_connections[device_id] = (ws, session)
 
-    # Load persistent conversation history from DB
+    # Load persistent conversation history and preferences from DB
     try:
         async with async_session_factory() as db:
             result = await db.execute(select(Device).where(Device.device_id == device_id))
             device_record = result.scalar_one_or_none()
-            if device_record and device_record.conversation_json:
-                conv = json.loads(device_record.conversation_json)
-                if isinstance(conv, list) and conv:
-                    load_conversation(device_id, conv)
+            if device_record:
+                if device_record.conversation_json:
+                    conv = json.loads(device_record.conversation_json)
+                    if isinstance(conv, list) and conv:
+                        load_conversation(device_id, conv)
+                if device_record.preferences_json:
+                    prefs = json.loads(device_record.preferences_json)
+                    if isinstance(prefs, dict) and prefs:
+                        load_preferences(device_id, prefs)
     except Exception as e:
-        logger.warning(f"[{session.session_id}] Failed to load conversation history: {e}")
+        logger.warning(f"[{session.session_id}] Failed to load conversation/preferences: {e}")
 
     try:
         async for message in ws:
@@ -328,19 +357,22 @@ async def handle_client(ws: WebSocketServerProtocol, path: str):
             except Exception as e:
                 logger.error(f"[{session.session_id}] Failed to auto-save meeting: {e}")
 
-        # Save conversation history to DB (persist across reconnects)
+        # Save conversation history and preferences to DB (persist across reconnects)
         try:
             conv = get_conversation(device_id)
+            prefs = get_preferences(device_id)
             async with async_session_factory() as db:
                 result = await db.execute(select(Device).where(Device.device_id == device_id))
                 device_record = result.scalar_one_or_none()
                 if device_record:
-                    device_record.conversation_json = json.dumps(conv[-20:], ensure_ascii=False)
+                    device_record.conversation_json = json.dumps(conv[-MAX_HISTORY:], ensure_ascii=False)
+                    device_record.preferences_json = json.dumps(prefs, ensure_ascii=False)
                     await db.commit()
         except Exception as e:
-            logger.warning(f"[{session.session_id}] Failed to save conversation history: {e}")
+            logger.warning(f"[{session.session_id}] Failed to save conversation/preferences: {e}")
         # Clean up in-memory (will be reloaded on next connect)
         reset_conversation(device_id)
+        clear_preferences(device_id)
         logger.info(f"[{session.session_id}] Session ended for device {device_id}")
 
 

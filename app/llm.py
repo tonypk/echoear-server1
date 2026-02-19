@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 from openai import AsyncOpenAI
 from .config import settings
 from .session import Session
+from .preferences import preferences_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,7 @@ def load_conversation(device_id: str, history: List[dict]):
 
 
 def get_conversation(device_id: str) -> List[dict]:
-    """Get current conversation history (for saving to DB on disconnect)."""
+    """Get current conversation history (for saving to DB)."""
     return _conversations.get(device_id, [])
 
 
@@ -180,6 +181,12 @@ async def plan_intent(text: str, session_id: str, session: Optional[Session] = N
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S (%A)")
     system_prompt = TOOL_PROMPT.replace("{current_datetime}", now_str)
     system_prompt = system_prompt.replace("{tool_list}", tool_descriptions_for_llm())
+
+    # Inject user preferences into system prompt (if any)
+    pref_text = preferences_for_prompt(device_id)
+    if pref_text:
+        system_prompt += "\n\n" + pref_text
+
     messages = [{"role": "system", "content": system_prompt}] + history
 
     chat_model = (session.config.get("openai_chat_model", settings.intent_model)
@@ -206,14 +213,13 @@ async def plan_intent(text: str, session_id: str, session: Optional[Session] = N
         intent = _migrate_old_format(intent)
 
     # Capture assistant response in conversation history
+    # For chat: store the response (it IS the final answer)
+    # For tool calls: don't store reply_hint here — pipeline.py will store the actual
+    # tool result (e.g., real weather data instead of "正在查询天气")
     if intent.get("tool") == "chat":
         resp = intent.get("args", {}).get("response", "")
         if resp:
             history.append({"role": "assistant", "content": resp})
-    else:
-        hint = intent.get("reply_hint", "")
-        if hint:
-            history.append({"role": "assistant", "content": hint})
 
     return intent
 
