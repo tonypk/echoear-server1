@@ -1,8 +1,10 @@
 import io
 import struct
 import logging
+import math
 from collections import OrderedDict
 from typing import Optional
+import numpy as np
 from openai import AsyncOpenAI
 from .config import settings
 from .session import Session
@@ -77,17 +79,11 @@ _HALLUCINATIONS = {
 }
 
 # Longer hallucination patterns — match as substrings
+# NOTE: Whisper prompt must stay under ~170 chars — longer prompts cause misrecognition.
 _ASR_PROMPT = (
-    "HiTony语音助手。播放音乐，放首歌，来一首，下一首，切歌，放点音乐，来点音乐，换首歌，"
-    "播放周杰伦的歌，播放Taylor Swift，播放邓紫棋，暂停，停止播放，继续播放，"
-    "音量大一点，音量小一点，声音调到50，声音太大了，声音太小了，"
-    "提醒我，每天提醒我，每周提醒我，每月提醒我，"
-    "工作日提醒我，每天8点提醒我，查看提醒，取消提醒，"
-    "设置闹钟，设个闹钟7点，定闹钟，早上7点叫我，叫我起床，"
-    "查看闹钟，取消闹钟，今天有什么安排，今天的安排，每日简报，今天天气怎么样，"
-    "倒计时，取消倒计时，搜索，帮我查一下，开始会议，结束会议，"
-    "记一下，笔记，帮我记，备忘，清空对话，新对话，忘掉对话，"
-    "你好，嗨，谢谢，再见，拜拜。"
+    "HiTony语音助手。播放音乐，放首歌，下一首，切歌，暂停，继续播放，停止播放，"
+    "音量大一点，音量小一点，提醒我，设置闹钟，今天天气怎么样，"
+    "搜索，帮我查一下，开始会议，结束会议，记一下，清空对话，你好，谢谢，再见。"
 )
 
 _HALLUCINATION_SUBSTRINGS = [
@@ -100,10 +96,35 @@ _HALLUCINATION_SUBSTRINGS = [
 ]
 
 
+def _preprocess_pcm(pcm_bytes: bytes) -> bytes:
+    """Pre-process PCM audio for reliable ASR:
+    Peak normalization to -3 dBFS (mic signal is very quiet, ~0.5% full scale).
+    """
+    samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
+    peak = np.max(np.abs(samples))
+    if peak < 100:  # Near-silence, don't amplify noise
+        return pcm_bytes
+
+    current_peak_db = 20 * math.log10(peak / 32768)
+    if current_peak_db > -6:  # Already loud enough
+        logger.info(f"ASR preprocess: peak {current_peak_db:.1f} dBFS (loud enough, skip)")
+        return pcm_bytes
+
+    target_peak = 32768 * 10 ** (-3.0 / 20)  # -3 dBFS
+    gain = target_peak / peak
+    normalized = np.clip(samples * gain, -32768, 32767).astype(np.int16)
+    logger.info(f"ASR preprocess: peak {current_peak_db:.1f} dBFS → gain {gain:.1f}x")
+    return normalized.tobytes()
+
+
 async def transcribe_pcm(pcm_bytes: bytes, session: Optional[Session] = None) -> str:
     """Transcribe PCM audio using OpenAI Whisper API"""
-    wav_bytes = pcm_to_wav(pcm_bytes)
     duration_s = len(pcm_bytes) / 2 / settings.pcm_sample_rate
+
+    # Peak normalization (mic signal is very quiet)
+    pcm_bytes = _preprocess_pcm(pcm_bytes)
+
+    wav_bytes = pcm_to_wav(pcm_bytes)
     logger.info(f"ASR: sending {len(pcm_bytes)} bytes PCM ({duration_s:.1f}s, {len(wav_bytes)} bytes WAV) to Whisper")
 
     # Filter very short recordings (<0.5s) — usually noise/accidental triggers
