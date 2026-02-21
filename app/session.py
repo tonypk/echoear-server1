@@ -18,6 +18,8 @@ class UserConfig:
     openai_chat_model: str = ""
     openai_asr_model: str = ""
 
+    asr_provider: str = ""  # "" or "whisper" = OpenAI Whisper, "funasr" = self-hosted FunASR
+
     tts_provider: str = ""  # "" or "openai" = OpenAI TTS, "edge" = Edge TTS
     openai_tts_model: str = ""
     openai_tts_voice: str = ""

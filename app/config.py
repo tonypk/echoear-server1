@@ -53,6 +53,10 @@ class Settings(BaseModel):
     # Meeting cleanup
     meeting_retention_days: int = int(os.getenv("MEETING_RETENTION_DAYS", "7"))
 
+    # ASR provider: "whisper" (default, OpenAI API) or "funasr" (self-hosted)
+    asr_provider: str = os.getenv("ASR_PROVIDER", "whisper")
+    funasr_url: str = os.getenv("FUNASR_URL", "ws://127.0.0.1:10095")
+
     # Audio parameters (PCM16)
     pcm_sample_rate: int = int(os.getenv("PCM_SAMPLE_RATE", "16000"))
     pcm_channels: int = int(os.getenv("PCM_CHANNELS", "1"))
